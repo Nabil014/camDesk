@@ -7,10 +7,10 @@ Este archivo es el diseño. Las reglas para no pisarse entre agentes están en [
 ## Qué no se construye
 
 - No hay app Android nueva. cellCam vive en `d:\DESARROLLO\Proyectos\cellCam` y **no se modifica**.
-- No hay protocolo nuevo. Manda [PROTOCOL.md](d:\DESARROLLO\Proyectos\cellCam\PROTOCOL.md) versión 1. Si el código de cellCam y ese archivo discrepan, se corrige el código de cellCam en su propio repo, no se adapta Camdesk a un desvío.
+- No hay protocolo nuevo. Manda el `PROTOCOL.md` de cellCam, versión 1 (`d:\DESARROLLO\Proyectos\cellCam\PROTOCOL.md`). La copia de lectura para este repo es [docs/PROTOCOL-v1.md](docs/PROTOCOL-v1.md) (**pendiente: copiarla desde cellCam**; no se edita aquí). Si el código de cellCam y ese archivo discrepan, se corrige el código de cellCam en su propio repo, no se adapta Camdesk a un desvío.
 - La cámara del teléfono no se compone encima de la grabación. La cámara virtual muestra solo el teléfono, ya rotado.
 - cellCam no envía audio (`HS_FLAG_AUDIO` está reservado y no hace nada). Zoom y Meet usan el micrófono que el usuario elige dentro de cada app.
-- Quedan fuera: HEVC, mDNS, escenas, filtros, streaming, micrófono virtual, instalar la cámara para todos los usuarios.
+- Quedan fuera: HEVC, mDNS, escenas, filtros salvo los dos de "Efectos", reemplazo del fondo por una imagen, streaming, micrófono virtual, instalar la cámara para todos los usuarios, `libx264`.
 
 ## Cómo conecta cellCam
 
@@ -23,43 +23,161 @@ El teléfono es el servidor. Camdesk es el cliente. Un solo cliente: si el plugi
 | Handshake | 16 bytes, magic `CCAM` = `0x4343414D` |
 | Frame | 20 bytes, magic `FRM0` = `0x46524D30`, luego el payload |
 | Video | H.264 Annex-B. `CODEC_CONFIG` = SPS/PPS. Después, un IDR |
-| Rotación | Bits 0-1 del campo `reserved` de la cabecera: 0, 90, 180, 270 grados horarios. La aplica el cliente |
+| Rotación | Bits 0-1 del campo `reserved` de la cabecera: 0, 90, 180, 270 grados horarios. La aplica el cliente. Puede cambiar en cualquier frame |
 | PTS | Microsegundos, origen arbitrario. Rebasar contra el primer frame |
 | Control | Tipo 2, payload de 8 bytes. En v1 solo `CTRL_REQUEST_KEYFRAME` (1) hace algo |
 | Congestión | El teléfono puede vaciar la cola y saltar el PTS. No es un error |
 
-Pedido por defecto: H.264, 1280x720, 30 fps, cámara trasera, flag de keyframe. Hay selector de 720p/1080p y de cámara trasera/frontal. Si el teléfono responde `STATUS_ADJUSTED`, se usan el ancho y el alto devueltos.
+Pedido por defecto: H.264, 1280x720, 30 fps, cámara trasera, flag de keyframe. Hay selector de 720p/1080p y de cámara trasera/frontal. Si el teléfono responde `STATUS_ADJUSTED`, se usan el ancho y el alto devueltos. Ese tamaño es el del decode y la preview; la cámara virtual no cambia (ver "Lienzo").
 
-Conexión, igual que el plugin `plugin/src/cellcam-source.c`:
+Conexión, igual que el plugin `plugin/src/cellcam-source.c`. Todo esto vive en el crate `link`:
 
-- **Automática.** Si `adb devices` ve un teléfono: `adb forward tcp:4747 tcp:4747` y conectar a `127.0.0.1`. Si no, Wi-Fi a la IP que muestra cellCam.
+- **Automática.** Si `adb devices` ve un teléfono en estado `device`: `adb -s <serial> forward tcp:4747 tcp:4747` y conectar a `127.0.0.1`. Si no, Wi-Fi a la IP que muestra cellCam.
 - **Solo USB** y **Solo Wi-Fi**.
-- `adb` se busca en el PATH y en `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`. Al soltar el USB: `adb forward --remove`.
+- `adb` se busca en el PATH y en `%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe`. Nunca se llama desde el hilo de la UI: levantar el servidor de adb puede tardar segundos.
+- Si `adb devices` muestra `unauthorized`, el estado es "teléfono no autorizado", no "desconectado". Con varios teléfonos se usa el primero en estado `device`.
+- Al soltar el USB o al cerrar la sesión: `adb -s <serial> forward --remove tcp:4747`. Nunca `--remove-all`: puede haber otros forwards de Android Studio.
 - Si el socket cae, reintentar cada 2 segundos mientras la sesión siga activa.
 - Si el magic no es `FRM0` o el largo pasa de 4 MiB: buscar el siguiente `FRM0`, descartar hasta un keyframe y enviar `CTRL_REQUEST_KEYFRAME`.
+- Rechazo por otro cliente conectado y versión incompatible: se detectan como diga `PROTOCOL.md` y tienen su propio estado.
 
-Hasta recibir el IDR que sigue al SPS/PPS, no se muestra nada. Un frame P de una sesión anterior se ve como basura.
+Hasta recibir el IDR que sigue al SPS/PPS, no se muestra nada. Un frame P de una sesión anterior se ve como basura. Cada reconexión reinicia el decoder.
 
 ## Árbol
 
 ```
-camdesk/
+camDesk/
   PLAN.md
   AGENTS.md
+  docs/PROTOCOL-v1.md       copia de lectura del protocolo de cellCam
   desktop/                  workspace Cargo
-    crates/protocol/        bytes del socket, sin FFmpeg ni UI
-    crates/decode/          H.264 → BGRA, rotación
+    Cargo.toml              miembros del workspace; dueño: Aplicación
+    crates/protocol/        bytes del socket, sin red, sin FFmpeg ni UI
+    crates/link/            TCP, adb, reintento, resync; entrega frames y estado
+    crates/decode/          H.264 → BGRA rotado (preview) y NV12 1920x1080 (cámara)
+    crates/fx/              desenfoque de fondo NVIDIA y corrección de color, sobre BGRA
     crates/vcam-shm/        contrato de memoria compartida (leer y escribir)
+    crates/vcam/            DLL IMFMediaSource + registro de la cámara virtual
     crates/record/          pantalla + audios → MP4
-    crates/app/             egui, arranque, cablea el resto
-  vcam/                     DLL IMFMediaSource, solo lee vcam-shm
+    crates/app/             egui, arranque, cablea el resto (binario `camdesk`)
+  spikes/vcam/              prueba descartable del paso 0
 ```
 
-`protocol`, `vcam-shm` y `record` no se importan entre sí. Se pueden escribir en paralelo. `decode` depende de los frames que describe `protocol`. `app` es el único que une todo. `vcam` depende solo del layout de `vcam-shm`.
+Dependencias permitidas:
+
+```
+protocol   ← link, decode
+vcam-shm   ← vcam, app
+record     ← app
+fx         ← app
+link, decode, fx, vcam, record, vcam-shm ← app
+```
+
+`protocol`, `vcam-shm`, `record` y `fx` no se importan entre sí. `link` y `decode` dependen solo de `protocol`. `vcam` depende solo de `vcam-shm`. `app` es el único que une todo.
+
+`vcam` es Rust (`windows-rs`), `crate-type = ["cdylib", "rlib"]`: la DLL la carga Windows; la parte `rlib` le da a `app` el alta y la baja de la cámara virtual, para que `app` no toque Media Foundation.
+
+### Plataformas
+
+- Objetivo: `x86_64-pc-windows-msvc`, Windows 11 22000+.
+- `protocol`, `vcam-shm` y `link` compilan y pasan `cargo test` también en macOS y Linux. Lo específico de Windows (ACL del archivo mapeado) va detrás de `#[cfg(windows)]`.
+- `fx`: la corrección de color es Rust puro y se prueba en cualquier sistema; el desenfoque NVIDIA va detrás de `#[cfg(windows)]`.
+- `decode`, `vcam`, `record` y `app` se compilan y prueban en Windows.
+
+## Firmas públicas iniciales
+
+Esqueleto para que todos arranquen a la vez. Los campos exactos del handshake y la cabecera salen de `PROTOCOL.md`; aquí solo se fija la forma. Cualquier cambio se anota aquí en el mismo cambio que el código.
+
+```rust
+// protocol — sin E/S
+pub const PORT: u16 = 4747;
+pub enum Rotation { R0, R90, R180, R270 }
+pub struct HandshakeRequest { /* campos de PROTOCOL.md */ }
+pub struct HandshakeResponse { pub status: HandshakeStatus, pub width: u32, pub height: u32, /* … */ }
+pub enum FrameKind { CodecConfig, Video, Control, /* … */ }
+pub struct FrameHeader { pub kind: FrameKind, pub keyframe: bool, pub rotation: Rotation, pub pts_us: i64, pub len: u32 }
+pub struct Frame { pub header: FrameHeader, pub payload: Vec<u8> }
+impl HandshakeRequest { pub fn to_bytes(&self) -> [u8; 16]; }
+impl HandshakeResponse { pub fn parse(b: &[u8; 16]) -> Result<Self, ProtocolError>; }
+pub struct FrameParser;            // push(&[u8]), next() -> Option<Result<Frame, Desync>>; resync a FRM0
+pub fn request_keyframe() -> Vec<u8>;
+
+// link — usa std::net y procesos adb, sin FFmpeg ni UI
+pub enum Mode { Auto, Usb, Wifi(std::net::Ipv4Addr) }
+pub enum Resolution { P720, P1080 }
+pub enum Camera { Back, Front }
+pub struct SessionConfig { pub mode: Mode, pub resolution: Resolution, pub camera: Camera }
+pub enum Status { Conectando, EnVivo { width: u32, height: u32 }, Desconectado, Ocupado, NoAutorizado, Incompatible }
+pub enum Event { Status(Status), Frame(protocol::Frame) }
+pub struct Session;                // start(cfg) -> (Session, Receiver<Event>); request_keyframe(); Drop = cerrar + forward --remove
+
+// decode — carga FFmpeg en Decoder::new(), nunca antes
+pub struct Decoder;                // new() -> Result; push(&Frame) -> Result<Option<Decoded>, DecodeError>; reset()
+pub struct Decoded { pub width: u32, pub height: u32, pub bgra: Vec<u8>, pub pts_us: i64 } // ya rotado
+impl Decoder { pub fn to_canvas_nv12(&mut self, d: &Decoded, y: &mut [u8], uv: &mut [u8], stride: usize); } // 1920x1080, barras negras
+
+// fx — sobre BGRA en memoria; no conoce cellCam, el decoder ni el lienzo
+pub struct ColorParams { pub brightness: f32, pub contrast: f32, pub saturation: f32, pub temperature: f32 } // -1.0..=1.0, 0 = neutro
+pub struct ColorCorrector;         // set(ColorParams); apply(bgra: &mut [u8], width, height, stride); neutro = no toca el frame
+pub enum BlurAvailability { Available, NoNvidiaGpu, NoRuntime }
+pub fn blur_availability() -> BlurAvailability;  // chequeo liviano, no carga el runtime
+pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(bgra: &mut [u8], width, height, stride) -> Result<(), FxError>
+
+// vcam-shm
+pub const WIDTH: u32 = 1920; pub const HEIGHT: u32 = 1080; pub const STRIDE: u32 = 1920;
+pub fn default_path() -> std::path::PathBuf;    // la fija el paso 0
+pub struct Writer;                 // create(path) -> io::Result; write(pts_100ns, |y, uv| …)
+pub struct Reader;                 // open(path) -> io::Result; read_latest(&mut y, &mut uv) -> Option<FrameInfo>
+
+// vcam (rlib)
+pub struct VirtualCamera;          // create() -> windows::core::Result; Drop = baja
+
+// record — no conoce cellCam
+pub fn monitors() -> Vec<MonitorInfo>;
+pub fn microphones() -> Vec<MicInfo>;   // el primero es el de comunicaciones por defecto
+pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub mic: Option<MicId>, pub output: std::path::PathBuf }
+pub struct Recording;              // start(cfg) -> Result; elapsed(); stop() -> Result<PathBuf>
+```
+
+`decode` señala con `DecodeError` cuando necesita un keyframe; `app` llama a `Session::request_keyframe()`.
+
+## Lienzo de la cámara virtual
+
+La cámara virtual es siempre **1920x1080 NV12 a 30 fps**. No cambia con la rotación, con el selector 720p/1080p ni con `STATUS_ADJUSTED`. Zoom y Meet pierden la cámara si cambia el formato.
+
+- `decode` escala el frame ya rotado para que entre completo en 1920x1080, centrado, con barras negras (Y=16, UV=128).
+- Teléfono horizontal a 720p: se escala a 1920x1080. Teléfono vertical: unos 608x1080 al centro, con barras a los costados.
+- La preview de la UI usa el BGRA a tamaño nativo, no el lienzo, ya con los efectos aplicados.
+
+## Efectos
+
+Orden fijo por frame: decode → rotación → desenfoque de fondo → corrección de color → preview y lienzo NV12. `app` hace la cadena llamando a `decode` y a `fx`. El desenfoque va después de la rotación porque el modelo espera a la persona derecha, y antes del color para que la segmentación vea la imagen original.
+
+Los efectos afectan a la preview y a la cámara virtual. No afectan a la grabación de pantalla. Los ajustes se recuerdan entre sesiones en `%LOCALAPPDATA%\Camdesk\config.toml` (dueño: `app`).
+
+### Desenfoque de fondo (NVIDIA)
+
+- Por qué NVIDIA y no otra cosa: el desenfoque de Zoom y Meet es peor. Windows Studio Effects solo existe en equipos con NPU y solo se aplica a cámaras físicas, no a una virtual. La app NVIDIA Broadcast encadenada da el mismo resultado, pero exige otra app abierta y otra cámara virtual en el medio.
+- SDK: NVIDIA Maxine Video Effects. Efecto `GreenScreen` (máscara de la persona) y luego `BackgroundBlur` (imagen + máscara). FFI escrito a mano en `fx` contra `NVVideoEffects.dll`, cargada en tiempo de ejecución.
+- Requisitos: GPU NVIDIA RTX (Turing o más nueva), driver actual y el runtime "NVIDIA Video Effects" instalado por el usuario desde el sitio de NVIDIA. **Camdesk no redistribuye DLL ni modelos de NVIDIA.** Antes de distribuir Camdesk, revisar la licencia del SDK.
+- Ubicación del runtime: variable `NV_VIDEO_EFFECTS_PATH` y, si no está, `C:\Program Files\NVIDIA Corporation\NVIDIA Video Effects`. Es lo que hace OBS; confirmarlo con el runtime instalado.
+- `blur_availability()` solo busca el archivo del runtime y un adaptador NVIDIA por DXGI. El chequeo definitivo (RTX, versión del driver, modelos) es `BackgroundBlur::new()`.
+- Si no se cumple algún requisito, la casilla aparece deshabilitada con el motivo y el enlace de descarga del runtime. No hay desenfoque de respaldo.
+- Controles: casilla y fuerza de 0 a 100 %. Modo calidad por defecto; si el efecto no sostiene 30 fps, pasa a modo rendimiento y se avisa en la UI.
+- Camino de datos en v1: BGRA en CPU → GPU (`NvCVImage_Transfer`) → `GreenScreen` → `BackgroundBlur` → CPU. El decode sigue en CPU. Mantener todo en GPU (decode D3D11 + interop CUDA) queda como optimización posterior.
+- Si cambia el tamaño del frame (rotación, 720p/1080p), `apply()` se reconfigura sola. El primer frame después del cambio puede tardar más.
+- Si el efecto falla en medio de la sesión (driver, memoria de GPU), se apaga, se avisa en la UI y el video sigue sin desenfoque. La cámara virtual nunca se corta por un efecto.
+
+### Corrección de color
+
+- Brillo, contraste, saturación y temperatura (frío a cálido). Un slider por control y un botón Restablecer.
+- En CPU sobre BGRA: una tabla de 256 entradas por canal para brillo, contraste y temperatura, y mezcla con la luma para la saturación. Con todo en neutro no se toca el frame.
 
 ## Memoria compartida de la cámara virtual
 
-Archivo mapeado: `%LOCALAPPDATA%\Camdesk\cellcam-vcam.bin`.
+Archivo mapeado. Ruta candidata: `%ProgramData%\Camdesk\cellcam-vcam.bin`, con ACL de lectura para `LOCAL SERVICE`. **La confirma el paso 0**; hasta entonces `default_path()` es la única fuente de verdad y nadie escribe la ruta a mano.
+
+El archivo se crea una sola vez por ejecución de Camdesk, al conectar por primera vez, con tamaño fijo. No se recrea en la sesión.
 
 Cabecera de 64 bytes, little-endian (esto es IPC local de Windows, no el protocolo del teléfono):
 
@@ -67,48 +185,89 @@ Cabecera de 64 bytes, little-endian (esto es IPC local de Windows, no el protoco
 |---:|---|---|
 | 0 | magic `CVC1` = `0x43564331` | u32 |
 | 4 | version = 1 | u32 |
-| 8 | width | u32 |
-| 12 | height | u32 |
-| 16 | stride de Y (NV12) | u32 |
+| 8 | width = 1920 | u32 |
+| 12 | height = 1080 | u32 |
+| 16 | stride de Y (NV12) = 1920 | u32 |
 | 20 | slot activo, 0 o 1 | u32 |
 | 24 | sequence del slot 0 | u64 |
-| 32 | sequence del slot 1 | u64 |
-| 40 | pts en unidades de 100 ns | i64 |
-| 48 | reservado, ceros | 16 bytes |
+| 32 | pts del slot 0, unidades de 100 ns | i64 |
+| 40 | sequence del slot 1 | u64 |
+| 48 | pts del slot 1, unidades de 100 ns | i64 |
+| 56 | reservado, ceros | 8 bytes |
 
-Después, dos slots NV12. Cada slot es `stride * height` de Y más `stride * height / 2` de UV intercalado. `width` y `height` son pares.
+Slots a partir del offset 64. Cada slot es `stride * height` de Y más `stride * height / 2` de UV intercalado: 3 110 400 bytes. Slot 0 en 64, slot 1 en 3 110 464. Tamaño total: 6 220 864 bytes.
 
-Seqlock: el escritor incrementa `sequence` del slot a impar, escribe el NV12, incrementa a par. El lector solo usa un slot con sequence par y estable tras dos lecturas iguales. Si no hay frame nuevo, repite el último.
+`width`, `height` y `stride` se escriben al crear el archivo y no cambian. El lector los valida contra las constantes y, si no coinciden o `magic`/`version` no son los esperados, entrega negro.
 
-Si el handshake cambia el tamaño, el escritor recrea el archivo y la cámara virtual se vuelve a registrar.
+Seqlock. Las `sequence` se acceden como `AtomicU64` (offsets alineados a 8) y `slot activo` como `AtomicU32`.
+
+Escritor (un solo hilo):
+1. `s` = el slot que **no** es el activo.
+2. `seq[s] += 1` (queda impar), luego `fence(Release)`.
+3. Escribir NV12 y `pts[s]`.
+4. `seq[s] += 1` (queda par) con `Release`.
+5. `activo = s` con `Release`.
+
+Lector:
+1. `s = activo` con `Acquire`. `a = seq[s]` con `Acquire`. Si `a` es impar, reintentar.
+2. Copiar NV12 y `pts[s]` a un buffer propio.
+3. `fence(Acquire)`, `b = seq[s]`. Si `a == b`, el frame es válido. Si no, reintentar.
+4. Hasta 3 intentos. Si ninguno sale, o `a` es igual al último frame entregado, se repite el último frame.
+
+Estado inicial: al crear el archivo, el escritor llena los dos slots de negro con `sequence = 2`. La cámara muestra negro hasta el primer frame del teléfono y se queda en el último cuadro si la conexión cae.
+
+Cambiar un offset rompe la cámara: se sube `version` y se actualizan `vcam-shm` y `vcam` en el mismo cambio.
 
 ## Cámara virtual
 
-Windows 11 build 22000 o más nuevo (esta máquina es 26200). `MFCreateVirtualCamera`:
+Windows 11 build 22000 o más nuevo (la máquina de prueba es 26200). `MFCreateVirtualCamera`:
 
-- Nombre: `cellCam`. Windows agrega el sufijo "Windows Virtual Camera".
-- `MFVirtualCameraLifetime_Session` y `MFVirtualCameraAccess_CurrentUser`. Existe mientras Camdesk está abierto. Sin administrador.
-- La DLL `vcam` es el `IMFMediaSource`. Se registra en `HKCU` la primera vez.
-- Entrega NV12 con timestamps desde cero: `frame * 1/30 s`, y clean point en cada muestra, para que Meet no congele la imagen.
-- Si Zoom o Meet no listan la cámara, el respaldo es el filtro DirectShow [softcam](https://github.com/tshino/softcam), una sola vez y con administrador. No se implementan los dos a la vez. Primero la API de Windows 11.
+- Nombre: `cellCam`. Cómo lo muestran Zoom y Meet se anota tras el paso 0.
+- `MFVirtualCameraLifetime_Session` y `MFVirtualCameraAccess_CurrentUser`. Existe mientras Camdesk está abierto.
+- La DLL del crate `vcam` es el `IMFMediaSource`. **No corre en el proceso de Camdesk**: la carga el servicio Frame Server (`svchost`, cuenta `LOCAL SERVICE`). Consecuencias: no puede usar `%LOCALAPPDATA%` del usuario, no puede leer archivos con ACL del perfil del usuario, y su registro COM tiene que ser visible para ese servicio.
+- Entrega NV12 1920x1080 con timestamps desde cero: `frame * 1/30 s`, y clean point en cada muestra, para que Meet no congele la imagen. El `pts` de la memoria compartida es informativo; el reloj de la cámara es el del contador de frames.
+- Log de la DLL: `OutputDebugString` y un archivo junto al archivo mapeado. No hay otra forma de depurar dentro de Frame Server.
+
+### Paso 0 — prueba de la cámara virtual (antes de escribir `vcam`)
+
+En `spikes/vcam/`, en Windows. Una DLL mínima que lee un patrón de un archivo mapeado y un exe que llama a `MFCreateVirtualCamera`. Responde, y se anota aquí:
+
+1. ¿Alcanza con registrar el CLSID en `HKCU`, o Frame Server solo lo ve en `HKLM` (administrador)?
+2. ¿Desde qué carpeta puede cargar la DLL Frame Server? (Perfil del usuario, `%ProgramData%`, `%ProgramFiles%`.)
+3. ¿La ruta `%ProgramData%\Camdesk\` con ACL de lectura para `LOCAL SERVICE` funciona para el archivo mapeado?
+4. ¿Zoom y Meet en Chrome listan la cámara y la imagen se mueve?
+
+Si alguna respuesta exige administrador o Zoom/Meet no la listan, **se para y se decide con el usuario** entre "administrador una sola vez" y el respaldo DirectShow [softcam](https://github.com/tshino/softcam). No se implementan los dos a la vez.
+
+Resultados del paso 0: _pendiente_.
 
 ## Grabación
 
-- Pantalla: `windows-capture` (Windows.Graphics.Capture), monitor elegido en la UI.
-- Audio del sistema: WASAPI loopback del dispositivo de reproducción por defecto.
+- Pantalla: `windows-capture` (Windows.Graphics.Capture), monitor elegido en la UI, resolución nativa del monitor.
+- **30 fps constantes.** WGC solo entrega frames cuando cambia la pantalla: si no llega uno a tiempo se repite el último. Si el encode se atrasa, se descarta el frame de pantalla más viejo.
+- Audio del sistema: WASAPI loopback del dispositivo de reproducción por defecto. **El loopback no entrega paquetes en silencio**: el hueco se rellena con ceros según el reloj, si no el audio se corre.
 - Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes.
 - Las dos pistas pasan a 48 kHz estéreo float, se suman y se recortan. Cada una se puede apagar.
-- Salida: `Videos/Camdesk/grabacion-YYYYMMDD-HHMMSS.mp4`.
-- Encoder de video, en este orden: NVENC, AMF, Quick Sync, `h264_mf`. `libx264` solo si no hay encoder de hardware.
-- Audio AAC. Reloj común: `QueryPerformanceCounter`.
-- Si el encode se atrasa, se descarta el frame de pantalla más viejo.
-- Las DLL de FFmpeg van junto al exe.
+- Reloj común: `QueryPerformanceCounter`. Cada pista se alinea a ese reloj; si se corre más de 20 ms, se insertan o descartan muestras.
+- Si cambia el dispositivo por defecto en medio de la grabación, se reabre y el hueco va en silencio. La grabación no se corta.
+- Salida: carpeta Videos del usuario (`FOLDERID_Videos`) + `Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4`.
+- **MP4 fragmentado** (`frag_keyframe+empty_moov+default_base_moof`) para que un cuelgue no deje el archivo ilegible.
+- Encoder de video, en este orden: NVENC, AMF, Quick Sync, `h264_mf`. `h264_mf` ya cae al encoder de software de Windows; no se usa `libx264`.
+- Audio AAC.
+
+## FFmpeg
+
+- Build **LGPL**, sin componentes GPL. Las DLL van junto al exe.
+- Se enlazan con **carga diferida** (`/DELAYLOAD` para cada DLL de FFmpeg, o carga en tiempo de ejecución). Con import libs normales, Windows las carga al arrancar el proceso y se rompe la regla de arranque.
+- Las usan `decode` y `record`. Ninguno las toca antes de `Decoder::new()` o `Recording::start()`.
 
 ## Arranque
 
-La ventana egui abre sola. FFmpeg, la cámara virtual, WASAPI y la captura de pantalla se crean al conectar el teléfono o al pulsar Grabar. Objetivo: ventana usable en menos de un segundo. OBS tarda varios segundos porque carga Qt, plugins y la escena; Camdesk no hace eso.
+La ventana egui abre sola. FFmpeg, la cámara virtual, el archivo mapeado, adb, WASAPI y la captura de pantalla se crean al conectar el teléfono o al pulsar Grabar. El runtime de NVIDIA se carga recién al activar el desenfoque. Objetivo: ventana usable en menos de un segundo. OBS tarda varios segundos porque carga Qt, plugins y la escena; Camdesk no hace eso.
 
 En uso, el costo grande es el mismo que en OBS: el teléfono codifica y el PC decodifica H.264. Sin mezclador de escenas, el preview gasta un poco menos. La latencia hacia Zoom es la del protocolo más un frame de la cámara virtual.
+
+Log de la app: `%LOCALAPPDATA%\Camdesk\camdesk.log`.
 
 ## UI
 
@@ -116,16 +275,33 @@ Español. Controles de la primera versión:
 
 - Modo de conexión: Automática, Solo USB, Solo Wi-Fi. Campo de IP.
 - Resolución 720p o 1080p. Cámara trasera o frontal. Botón Conectar.
-- Preview de la imagen ya rotada. Estado: conectando, en vivo, desconectado.
+- Preview de la imagen ya rotada.
+- Estado: conectando, en vivo, desconectado, ocupado (otro cliente conectado al teléfono), teléfono no autorizado (aceptar la depuración USB), versión incompatible.
+- Efectos: casilla "Desenfocar fondo" y su fuerza (deshabilitada con el motivo si no hay RTX o runtime). Sliders de brillo, contraste, saturación y temperatura, y botón Restablecer.
 - Monitor, casillas de audio del sistema y de micrófono, desplegable de micrófono.
 - Grabar / Detener y el tiempo transcurrido.
 
+## Orden de trabajo
+
+0. Esqueleto del workspace con todos los crates vacíos que compilan (dueño: Aplicación). Copiar `docs/PROTOCOL-v1.md`. Paso 0 de la cámara virtual, en Windows.
+1. En paralelo, con las firmas de arriba: `protocol`, `vcam-shm`, `link`, `decode`, `fx`, `record`, ventana de `app`.
+2. `vcam`, cuando el paso 0 tenga resultados y `vcam-shm` tenga el `Reader`.
+3. `app` cablea todo.
+4. Prueba de aceptación.
+
 ## Prueba de aceptación
 
-1. cellCam en Iniciar stream. Conectar por Wi-Fi (misma red, sin aislamiento de clientes) y por USB con depuración.
+1. cellCam en Iniciar stream. Conectar por Wi-Fi (misma red, sin aislamiento de clientes) y por USB con depuración. Con el plugin de OBS conectado, el estado es "ocupado".
 2. La preview queda derecha al girar el teléfono.
 3. Zoom, configuración de video, muestra cellCam y la imagen se mueve. Lo mismo en el selector de cámara de Meet en Chrome.
-4. Grabar 15 segundos con un video sonando y hablando al micrófono. El MP4 muestra el monitor y se oyen las dos cosas.
-5. Cortar el Wi-Fi: estado desconectado, la cámara virtual se queda en el último cuadro y vuelve al reconectar.
+4. Con Zoom mostrando la cámara, girar el teléfono y cambiar 720p/1080p: Zoom no pierde la cámara, la imagen queda derecha con barras.
+5. Abrir Zoom antes de conectar el teléfono: muestra negro y luego la imagen.
+6. Grabar 15 segundos con un video sonando y hablando al micrófono. El MP4 muestra el monitor y se oyen las dos cosas. Repetir con Zoom usando la cámara al mismo tiempo.
+7. Grabar 30 minutos con la pantalla quieta parte del tiempo y sin sonido parte del tiempo: el audio sigue sincronizado al final y el MP4 dura 30 minutos.
+8. Cortar el Wi-Fi: estado desconectado, la cámara virtual se queda en el último cuadro y vuelve al reconectar.
+9. Abrir la app: ventana usable en menos de 1 s y, en Process Explorer, ninguna DLL de FFmpeg ni de NVIDIA cargada hasta conectar o activar el desenfoque.
+10. En una PC con RTX y el runtime: activar el desenfoque con Zoom abierto. El fondo se ve desenfocado en Zoom y en la preview, la cámara sigue a 30 fps y la imagen sigue bien al girar el teléfono.
+11. En una PC sin RTX o sin runtime: la casilla está deshabilitada y dice por qué.
+12. Mover los sliders de color: el cambio se ve en la preview y en Zoom. Restablecer deja la imagen como sin efectos. Al reabrir la app, los ajustes siguen.
 
-Los crates `protocol` y `vcam-shm` se prueban sin teléfono y sin Zoom, con fixtures de bytes.
+Los crates `protocol`, `vcam-shm` y `link`, y la corrección de color de `fx`, se prueban sin teléfono y sin Zoom, con fixtures de bytes.
