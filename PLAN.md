@@ -342,7 +342,7 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado y Meet no 
 
 1. USB: `adb` ve el teléfono `e5c31a82` en `device`. Conectar en modo automático pasa a **Ocupado**: otro cliente ya tiene el stream. Wi-Fi no se probó.
 2. No hubo preview: el teléfono no entregó frames.
-3. Zoom no está instalado. Meet no se abrió. La cámara virtual sí arranca al conectar (`cámara iniciada` en el log) y se va al cerrar la ventana.
+3. Zoom no está instalado. Meet no se abrió. Chrome, con Camdesk en Conectar, abre `cellCam (Windows Virtual Camera)` a 1920x1080. Antes el segundo `Start` encontraba la fuente todavía activa y `getUserMedia` devolvía `NotReadableError`; ahora ese arranque reinicia la fuente. Sin el teléfono el cuadro queda negro. El forward de OBS no se tocó.
 4 y 5. Sin Zoom y sin imagen, no se vieron el giro ni el negro inicial.
 6. Primera toma de 15,5 s (`Videos\Camdesk\grabacion-20261125-005430.mp4`): audio 15,5 s y video aplastado a 51 ms, porque el MP4 cambia la base de 1/30 a 1/15360 y los timestamps no se convertían. Corregido. Segunda toma (`grabacion-20261125-005941.mp4`): video 14,67 s a 30 fps, audio 14,76 s, encoder `h264_nvenc`, monitor 1360x768. `graba_un_segundo` mide video 1,000 s a 30 fps y audio 1,081 s. No se repitió con Zoom ni con un video sonando a propósito.
 7. Grabación de 30 min (`Videos\Camdesk\grabacion-20261125-010534.mp4`), encoder `h264_nvenc`, 1360x768. El MP4 dura 29:59,77. Video 1799,67 s a 30 fps y audio 1799,76 s (92 ms de diferencia). En el minuto 10 el cuadro está quieto y el audio está en silencio (−70 dB). Un tono de 1 kHz al final empieza en 1739,668 s y el cuadro pasa de rojo a verde en 1739,667 s. No se usó Zoom.

@@ -200,6 +200,7 @@ struct SourceInner {
     state: Mutex<SourceState>,
     started_before: AtomicBool,
     origin: AtomicI64,
+    samples: AtomicU32,
     d3d: Mutex<Option<IUnknown>>,
 }
 
@@ -218,7 +219,6 @@ struct Stream {
     shutdown: AtomicBool,
     reader: Mutex<Option<Reader>>,
     reader_tried: AtomicBool,
-    samples: AtomicU32,
     frame: Mutex<Vec<u8>>,
     _track: Track,
 }
@@ -267,6 +267,7 @@ impl Source {
             state: Mutex::new(SourceState::Stopped),
             started_before: AtomicBool::new(false),
             origin: AtomicI64::new(0),
+            samples: AtomicU32::new(0),
             d3d: Mutex::new(None),
         });
         let source: IMFMediaSourceEx = Source { inner: inner.clone(), _track: Track::new() }.into();
@@ -281,7 +282,6 @@ impl Source {
             shutdown: AtomicBool::new(false),
             reader: Mutex::new(None),
             reader_tried: AtomicBool::new(false),
-            samples: AtomicU32::new(0),
             frame: Mutex::new(black_frame()),
             _track: Track::new(),
         }
@@ -362,10 +362,14 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaSource_Impl for Source_Impl
         }
         let state = *self.inner.state.lock().unwrap_or_else(|poison| poison.into_inner());
         if state == SourceState::Shutdown {
+            log_line("start rechazado: la fuente ya se cerró");
             return Err(fail(MF_E_SHUTDOWN));
         }
-        if state != SourceState::Stopped {
-            return Err(fail(MF_E_INVALID_STATE_TRANSITION));
+        // Chrome para el track y vuelve a pedir Start antes de que llegue Stop.
+        // Un segundo Start con la fuente activa es el mismo cliente, no un error.
+        if state == SourceState::Started {
+            log_line("start con la fuente ya activa");
+            self.Stop()?;
         }
         let descriptor = ppresentationdescriptor.ok()?;
         let mut selected = BOOL(0);
@@ -377,6 +381,7 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaSource_Impl for Source_Impl
         };
         let origin = start_origin(pvarstartposition);
         self.inner.origin.store(origin, Ordering::Release);
+        self.inner.samples.store(0, Ordering::Release);
         mark_state(&self.inner, SourceState::Started);
         let when = int64_variant(origin);
         let none = GUID::zeroed();
@@ -559,7 +564,7 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaStream_Impl for Stream_Impl
         if *self.state.lock().unwrap_or_else(|poison| poison.into_inner()) != MF_STREAM_STATE_RUNNING {
             return Err(fail(MF_E_MEDIA_SOURCE_WRONGSTATE));
         }
-        let index_due = self.samples.load(Ordering::Acquire) as i64;
+        let index_due = self.source.samples.load(Ordering::Acquire) as i64;
         let due = self.source.origin.load(Ordering::Acquire) + index_due * 10_000_000 / 30;
         let now = unsafe { MFGetSystemTime() };
         if due > now {
@@ -590,7 +595,7 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaStream_Impl for Stream_Impl
         let buffer = unsafe { MFCreate2DMediaBuffer(WIDTH, HEIGHT, NV12_FOURCC, false) }?;
         copy_nv12(&buffer, &frame)?;
         unsafe { sample.AddBuffer(&buffer)? };
-        let index = self.samples.fetch_add(1, Ordering::AcqRel) as i64;
+        let index = self.source.samples.fetch_add(1, Ordering::AcqRel) as i64;
         let time = self.source.origin.load(Ordering::Acquire) + index * 10_000_000 / 30;
         let duration = (index + 1) * 10_000_000 / 30 - time;
         unsafe {
