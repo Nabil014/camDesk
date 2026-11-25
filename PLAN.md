@@ -109,7 +109,7 @@ pub enum Mode { Auto, Usb, Wifi(std::net::Ipv4Addr) }
 pub enum Resolution { P720, P1080 }
 pub enum Camera { Back, Front }
 pub struct SessionConfig { pub mode: Mode, pub resolution: Resolution, pub camera: Camera, pub wifi: Option<std::net::Ipv4Addr> }
-pub enum Status { Conectando, EnVivo { width: u32, height: u32 }, Desconectado, Ocupado, NoAutorizado, Incompatible }
+pub enum Status { Conectando, EnVivo { width: u32, height: u32, camera: Camera }, Desconectado, Ocupado, NoAutorizado, Incompatible }
 pub enum Event { Status(Status), Frame(protocol::Frame) }
 pub struct Session;                // start(cfg) -> (Session, Receiver<Event>); request_keyframe(); Drop = cerrar + forward --remove
 ```
@@ -353,4 +353,4 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado. Meet list
 11. En esta PC (RTX 4060 y runtime 0.7.6) la casilla «Desenfocar fondo» queda habilitada, sin motivo ni enlace, y al abrir no se cargan `NVVideoEffects.dll` ni FFmpeg. La rama sin runtime muestra la casilla y la fuerza deshabilitadas, el texto «sin el runtime de NVIDIA Video Effects» y el enlace «Descargar el runtime» hacia la página del redistribuible 0.7.6. Esa rama se vio forzando el resultado en una corrida local que después se revirtió: no hay otra PC sin RTX.
 12. Sin conectar, los cuatro sliders se movieron a brillo 0,2, contraste −0,4, saturación 0,6 y temperatura −0,25. Al cerrar y reabrir, los cuatro volvieron en esos valores. Restablecer los dejó en 0 y lo escribió en la config; la fuerza del desenfoque no se tocó. Con el teléfono en vivo a 1280x720, el brillo 0,35 dejó el cuadro en un promedio de 198; subirlo a 1 lo llevó a 235, y Restablecer (brillo 0) lo bajó a 142. Después se restauró el brillo 0,35. Zoom no está instalado. `cargo test -p fx` ya cubre que el neutro no cambia un píxel y que el brillo alto aclara un gris.
 
-El selector Frontal no está en la lista numerada. Con ese valor el estado fue En vivo 1280x720 y el cuadro siguió siendo el de la trasera: la misma persona y el mismo techo, diferencia media 1 sobre 255. cellCam abre siempre la cámara trasera. Se dejó otra vez la trasera. El lienzo siguió en 1920x1080.
+El selector Frontal no está en la lista numerada. Con ese valor el estado fue En vivo 1280x720 y el cuadro siguió siendo el de la trasera: la misma persona y el mismo techo, diferencia media 1 sobre 255. cellCam abre siempre la cámara trasera. El lienzo siguió en 1920x1080. Camdesk ahora usa la cámara de la respuesta: el aviso dice «El teléfono se quedó en la cámara trasera», el selector vuelve a Trasera y la config queda en `camera=back`.

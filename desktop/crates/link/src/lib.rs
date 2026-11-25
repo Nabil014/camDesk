@@ -44,7 +44,7 @@ pub struct SessionConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Conectando,
-    EnVivo { width: u32, height: u32 },
+    EnVivo { width: u32, height: u32, camera: Camera },
     Desconectado,
     Ocupado,
     NoAutorizado,
@@ -288,7 +288,8 @@ fn talk(
     };
     let status = match parsed.status {
         protocol::HandshakeStatus::Ok | protocol::HandshakeStatus::Adjusted => {
-            Status::EnVivo { width: parsed.width, height: parsed.height }
+            let camera = if parsed.camera == 1 { Camera::Front } else { Camera::Back };
+            Status::EnVivo { width: parsed.width, height: parsed.height, camera }
         }
         protocol::HandshakeStatus::Version | protocol::HandshakeStatus::Codec => Status::Incompatible,
         protocol::HandshakeStatus::Camera => Status::Ocupado,
@@ -482,11 +483,38 @@ mod tests {
         });
         let (_session, rx) = session(server.port);
         let event = recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
-        assert_eq!(event, Event::Status(Status::EnVivo { width: 640, height: 480 }));
+        assert_eq!(
+            event,
+            Event::Status(Status::EnVivo { width: 640, height: 480, camera: Camera::Back })
+        );
         let event = recv_until(&rx, |ev| matches!(ev, Event::Frame(_)));
         let Event::Frame(frame) = event else { unreachable!() };
         assert_eq!(frame.payload, vec![1, 2, 3]);
         assert!(frame.header.keyframe);
+    }
+
+    #[test]
+    fn la_camara_aplicada_viene_en_el_estado() {
+        let server = Server::spawn(|mut stream| {
+            let req = read_handshake(&mut stream);
+            assert_eq!(req[11], 1, "el pedido tiene que pedir la frontal");
+            stream.write_all(&handshake_ok(1280, 720)).unwrap();
+        });
+        let (_session, rx) = start_at(
+            SessionConfig {
+                mode: Mode::Wifi(Ipv4Addr::LOCALHOST),
+                resolution: Resolution::P720,
+                camera: Camera::Front,
+                wifi: None,
+            },
+            Some(server.port),
+        )
+        .unwrap();
+        let event = recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
+        assert_eq!(
+            event,
+            Event::Status(Status::EnVivo { width: 1280, height: 720, camera: Camera::Back })
+        );
     }
 
     #[test]

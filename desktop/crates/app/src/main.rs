@@ -395,6 +395,16 @@ impl CamdeskApp {
                             decoder.reset();
                         }
                     }
+                    if let Status::EnVivo { camera, .. } = status {
+                        if camera != self.camera {
+                            self.camera = camera;
+                            self.dirty = true;
+                            self.notice = match camera {
+                                Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
+                                Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
+                            };
+                        }
+                    }
                     self.status = status_text(status);
                 }
                 Event::Frame(frame) => {
@@ -716,7 +726,7 @@ fn app_log(message: &str) {
 fn status_text(status: Status) -> String {
     match status {
         Status::Conectando => "Conectando".into(),
-        Status::EnVivo { width, height } => format!("En vivo {width}x{height}"),
+        Status::EnVivo { width, height, .. } => format!("En vivo {width}x{height}"),
         Status::Desconectado => "Desconectado".into(),
         Status::Ocupado => "Ocupado".into(),
         Status::NoAutorizado => "Teléfono no autorizado".into(),
