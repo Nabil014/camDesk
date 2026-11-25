@@ -345,7 +345,7 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado y Meet no 
 3. Zoom no está instalado. Meet no se abrió. La cámara virtual sí arranca al conectar (`cámara iniciada` en el log) y se va al cerrar la ventana.
 4 y 5. Sin Zoom y sin imagen, no se vieron el giro ni el negro inicial.
 6. Primera toma de 15,5 s (`Videos\Camdesk\grabacion-20261125-005430.mp4`): audio 15,5 s y video aplastado a 51 ms, porque el MP4 cambia la base de 1/30 a 1/15360 y los timestamps no se convertían. Corregido. Segunda toma (`grabacion-20261125-005941.mp4`): video 14,67 s a 30 fps, audio 14,76 s, encoder `h264_nvenc`, monitor 1360x768. `graba_un_segundo` mide video 1,000 s a 30 fps y audio 1,081 s. No se repitió con Zoom ni con un video sonando a propósito.
-7. No se hizo la grabación de 30 minutos.
+7. Grabación de 30 min (`Videos\Camdesk\grabacion-20261125-010534.mp4`), encoder `h264_nvenc`, 1360x768. El MP4 dura 29:59,77. Video 1799,67 s a 30 fps y audio 1799,76 s (92 ms de diferencia). En el minuto 10 el cuadro está quieto y el audio está en silencio (−70 dB). Un tono de 1 kHz al final empieza en 1739,668 s y el cuadro pasa de rojo a verde en 1739,667 s. No se usó Zoom.
 8. No se cortó el Wi-Fi.
 9. El handle de la ventana apareció en cerca de 1,1 s. Antes de Conectar no estaban cargadas `avcodec`, `swscale` ni el runtime de NVIDIA. Después de Conectar sí se cargan `avcodec-62.dll`, `avutil-60.dll` y `swscale-9.dll`.
 10. Hay una RTX 4060 y el runtime de NVIDIA Video Effects. La casilla se puede marcar y se apaga sola con el texto "el runtime está instalado, pero este build todavía no corre GreenScreen".
