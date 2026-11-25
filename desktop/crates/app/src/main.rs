@@ -235,6 +235,9 @@ impl CamdeskApp {
         if !self.blur_note.is_empty() {
             ui.label(egui::RichText::new(&self.blur_note).size(12.0).color(MUTED));
         }
+        if !available && self.notice.is_empty() {
+            self.notice = "Sin desenfoque\nSin GPU NVIDIA, o sin el runtime de NVIDIA Video Effects. La cámara sigue.".into();
+        }
         if !available {
             ui.hyperlink_to(
                 "Descargar el runtime",
@@ -1058,6 +1061,7 @@ fn notice_color(text: &str) -> egui::Color32 {
         || lower.contains("nvidia")
         || lower.contains("runtime")
         || lower.contains("gpu")
+        || lower.contains("desenfo")
     {
         WARN
     } else {
