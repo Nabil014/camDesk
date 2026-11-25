@@ -6,7 +6,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod theme;
 mod video;
+mod widgets;
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -15,21 +17,23 @@ use std::time::Duration;
 use eframe::egui;
 use fx::{BlurAvailability, ColorParams, blur_availability};
 use link::{Camera, Mode, Resolution, SessionConfig, Status, Transport};
+use theme::Tone;
 use video::{Command, Report, Video};
+use widgets::{Action, Icon};
 use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 700.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_inner_size([1280.0, 800.0])
+            .with_min_inner_size([1060.0, 640.0]),
         ..Default::default()
     };
     eframe::run_native(
         "Camdesk",
         options,
         Box::new(|cc| {
-            apply_style(&cc.egui_ctx);
+            theme::apply(&cc.egui_ctx);
             Ok(Box::new(CamdeskApp::load()))
         }),
     )
@@ -41,7 +45,6 @@ struct CamdeskApp {
     resolution: Resolution,
     camera: Camera,
     color: ColorParams,
-    color_open: bool,
     blur_on: bool,
     blur_strength: f32,
     blur: Option<BlurAvailability>,
@@ -68,6 +71,8 @@ struct CamdeskApp {
     preview: Option<egui::TextureHandle>,
     recording: Option<Recording>,
     dirty: bool,
+    /// Alto que pidieron los docks en el cuadro anterior.
+    dock_height: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,7 +90,6 @@ impl CamdeskApp {
             resolution: Resolution::P720,
             camera: Camera::Back,
             color: ColorParams::default(),
-            color_open: false,
             blur_on: false,
             blur_strength: 0.5,
             blur: None,
@@ -109,29 +113,51 @@ impl CamdeskApp {
             preview: None,
             recording: None,
             dirty: false,
+            dock_height: 360.0,
         };
         app.read_config();
         app
     }
 
-    fn rail(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("riel")
-            .exact_width(320.0)
-            .resizable(false)
-            .show_separator_line(true)
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 8)))
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    self.connection(ui);
-                    self.effects(ui);
-                    self.record_ui(ui);
-                });
-            });
+    /// Cuatro docks en columnas: conexión, efectos, grabación y controles. Devuelve el alto usado.
+    fn docks(&mut self, ui: &mut egui::Ui) -> f32 {
+        let area = ui.available_rect_before_wrap();
+        let width = (area.width() - 3.0) / 4.0;
+        let mut bottom = area.top();
+        for column in 0..4 {
+            let left = area.left() + column as f32 * (width + 1.0);
+            let inner = egui::Rect::from_min_size(
+                egui::pos2(left + 16.0, area.top() + 14.0),
+                egui::vec2(width - 32.0, 2000.0),
+            );
+            let mut child = ui.new_child(
+                egui::UiBuilder::new().id_salt(("dock", column)).max_rect(inner).layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.spacing_mut().item_spacing.y = 7.0;
+            match column {
+                0 => self.connection(&mut child),
+                1 => self.effects(&mut child),
+                2 => self.record_ui(&mut child),
+                _ => self.controls(&mut child),
+            }
+            bottom = bottom.max(child.min_rect().bottom() + 16.0);
+        }
+        let used = egui::Rect::from_min_max(area.min, egui::pos2(area.right(), bottom));
+        ui.allocate_rect(used, egui::Sense::hover());
+        let line = egui::Stroke::new(1.0_f32, theme::BORDER);
+        for column in 1..4 {
+            let x = area.left() + column as f32 * (width + 1.0) - 0.5;
+            ui.painter().vline(x, ui.clip_rect().y_range(), line);
+        }
+        used.height()
     }
 
     fn connection(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Conexión");
-        self.dirty |= segments(
+        widgets::section_title(ui, "CONEXIÓN");
+        ui.add_space(4.0);
+        widgets::field_label(ui, "Modo");
+        ui.spacing_mut().button_padding.x = 4.0;
+        self.dirty |= widgets::segmented(
             ui,
             &mut self.mode,
             &[
@@ -140,28 +166,28 @@ impl CamdeskApp {
                 ("Solo Wi-Fi", LinkMode::Wifi),
             ],
         );
-        let hint = if self.mode == LinkMode::Wifi { "IP del teléfono" } else { "IP, si hace falta" };
-        let ip = ui.add_enabled(
-            self.mode != LinkMode::Usb,
-            egui::TextEdit::singleline(&mut self.ip).hint_text(hint).desired_width(ui.available_width()),
-        );
+        ui.add_space(4.0);
+        let name = widgets::field_label(ui, "IP del teléfono");
+        let ip = ui
+            .add_enabled(
+                self.mode != LinkMode::Usb,
+                egui::TextEdit::singleline(&mut self.ip)
+                    // Con color propio: si no, el ejemplo se ve como una IP ya cargada.
+                    .hint_text(egui::RichText::new("192.168.1.37").color(theme::OFF))
+                    .font(theme::mono(12.0))
+                    .margin(egui::Margin::symmetric(10, 9))
+                    .desired_width(ui.available_width() - 20.0),
+            )
+            .labelled_by(name.id);
         self.dirty |= ip.changed();
-        self.dirty |= segments(ui, &mut self.resolution, &[("720p", Resolution::P720), ("1080p", Resolution::P1080)]);
-        self.dirty |= segments(ui, &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
-        let label = if !self.connected {
-            "Conectar"
-        } else if self.shown_status() == "Conectando" || self.status == "Teléfono no autorizado" {
-            "Cancelar"
-        } else {
-            "Desconectar"
-        };
-        if action_button(ui, label, Action::Primary).clicked() {
-            if !self.connected {
-                self.connect(ui.ctx());
-            } else {
-                self.disconnect();
-            }
-        }
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.columns(2, |cols| {
+            widgets::field_label(&mut cols[0], "Resolución");
+            self.dirty |= widgets::segmented(&mut cols[0], &mut self.resolution, &[("720p", Resolution::P720), ("1080p", Resolution::P1080)]);
+            widgets::field_label(&mut cols[1], "Cámara");
+            self.dirty |= widgets::segmented(&mut cols[1], &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
+        });
     }
 
     fn retrying(&self) -> bool {
@@ -185,7 +211,7 @@ impl CamdeskApp {
         self.connected = false;
         self.status = "Desconectado".into();
         if self.preview.is_some() && self.recording.is_none() {
-            self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
+            self.notice = LAST_FRAME.into();
         } else if self.notice.starts_with("Teléfono no autorizado") || self.notice.starts_with("Conectando") {
             self.notice.clear();
         }
@@ -200,114 +226,133 @@ impl CamdeskApp {
                 Some(BlurAvailability::NoRuntime) | None => "Sin el runtime de NVIDIA Video Effects. No hay efecto de respaldo.".into(),
             };
         }
-        section(ui, "Imagen");
-        let available = matches!(self.blur, Some(BlurAvailability::Available));
-        ui.add_enabled_ui(available, |ui| {
-            if toggle(ui, &mut self.blur_on, "Desenfocar fondo").changed() {
-                self.dirty = true;
-                // El runtime de NVIDIA se carga en el hilo de video, que es el que usa el efecto.
-                // Si no carga, llega BlurFailed y la casilla vuelve a apagarse.
-                let ctx = ui.ctx().clone();
-                let command = Command::Blur { on: self.blur_on, strength: self.blur_strength };
-                match self.ensure_video(&ctx) {
-                    Some(video) => video.send(command),
-                    None => self.blur_on = false,
-                }
-                if !self.blur_on {
-                    self.blur_perf = None;
-                    if self.notice.starts_with("Modo rendimiento") {
-                        self.notice.clear();
-                    }
-                }
-            }
-            if self.blur_on {
-                let mut percent = (self.blur_strength * 100.0).round();
-                if labeled_slider(ui, "Fuerza", &mut percent, 0.0..=100.0, true) {
-                    self.blur_strength = percent / 100.0;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().interact_size.y = 24.0;
+            widgets::section_title(ui, "EFECTOS");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::ghost_button(ui, "Restablecer").clicked() {
+                    self.color = ColorParams::default();
                     self.dirty = true;
-                    if let Some(video) = &self.video {
-                        video.send(Command::Blur { on: true, strength: self.blur_strength });
-                    }
+                    self.send_color();
                 }
-            }
+            });
         });
-        if !self.blur_note.is_empty() {
-            ui.label(egui::RichText::new(&self.blur_note).size(12.0).color(MUTED));
-        }
+        let available = matches!(self.blur, Some(BlurAvailability::Available));
+        egui::Frame::new()
+            .fill(theme::INSET)
+            .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(10, 8))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add_enabled_ui(available, |ui| self.blur_controls(ui));
+                if !self.blur_note.is_empty() {
+                    ui.label(egui::RichText::new(&self.blur_note).font(theme::body(12.0)).color(theme::TEXT_SOFT));
+                }
+                if !available {
+                    ui.hyperlink_to(
+                        egui::RichText::new("Descargar el runtime").font(theme::body(12.0)),
+                        "https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources/",
+                    );
+                }
+            });
         if !available && self.notice.is_empty() {
             self.notice = "Sin desenfoque\nSin GPU NVIDIA, o sin el runtime de NVIDIA Video Effects. La cámara sigue.".into();
         }
-        if !available {
-            ui.hyperlink_to(
-                "Descargar el runtime",
-                "https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources/",
-            );
-        }
-        if disclosure(ui, "Corrección de color", color_adjusted(&self.color).then_some("Ajustada")).clicked() {
-            self.color_open = !self.color_open;
-        }
-        if self.color_open {
-            let mut changed = false;
-            changed |= labeled_slider(ui, "Brillo", &mut self.color.brightness, -1.0..=1.0, false);
-            changed |= labeled_slider(ui, "Contraste", &mut self.color.contrast, -1.0..=1.0, false);
-            changed |= labeled_slider(ui, "Saturación", &mut self.color.saturation, -1.0..=1.0, false);
-            changed |= labeled_slider(ui, "Temperatura", &mut self.color.temperature, -1.0..=1.0, false);
-            if changed {
-                self.dirty = true;
-                self.send_color();
+        let mut changed = false;
+        for (label, value) in [
+            ("Brillo", &mut self.color.brightness),
+            ("Contraste", &mut self.color.contrast),
+            ("Saturación", &mut self.color.saturation),
+            ("Temperatura", &mut self.color.temperature),
+        ] {
+            let mut percent = (*value * 100.0).round();
+            let shown = signed(percent);
+            if widgets::slider(ui, label, &mut percent, -100.0..=100.0, &shown) {
+                *value = percent / 100.0;
+                changed = true;
             }
-            if ui
-                .add(
-                    egui::Button::new(egui::RichText::new("Restablecer").color(INFO))
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(egui::Stroke::NONE),
-                )
-                .clicked()
-            {
-                self.color = ColorParams::default();
-                self.dirty = true;
-                self.send_color();
-            }
+        }
+        if changed {
+            self.dirty = true;
+            self.send_color();
         }
     }
 
-    fn record_ui(&mut self, ui: &mut egui::Ui) {
-        section(ui, "Grabación");
-        self.ensure_monitors();
-        ui.horizontal(|ui| {
-            ui.label("Monitor");
-            let label = self.monitor_label();
-            egui::ComboBox::from_id_salt("monitor")
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    self.ensure_monitors();
-                    for item in &self.monitors {
-                        let selected = self.monitor.as_ref() == Some(&item.id);
-                        if ui.selectable_label(selected, monitor_text(item)).clicked() {
-                            self.monitor = Some(item.id.clone());
-                            self.monitor_size = Some((item.width, item.height));
-                            self.dirty = true;
-                        }
-                    }
-                });
-        });
-        self.dirty |= toggle(ui, &mut self.system_audio, "Audio del sistema").changed();
-        if self.system_audio {
-            level_meter(ui, self.meter_level(true));
+    fn blur_controls(&mut self, ui: &mut egui::Ui) {
+        if widgets::checkbox(ui, &mut self.blur_on, "Desenfocar fondo", Icon::None, "NVIDIA RTX").changed() {
+            self.dirty = true;
+            // El runtime de NVIDIA se carga en el hilo de video, que es el que usa el efecto.
+            // Si no carga, llega BlurFailed y la casilla vuelve a apagarse.
+            let ctx = ui.ctx().clone();
+            let command = Command::Blur { on: self.blur_on, strength: self.blur_strength };
+            match self.ensure_video(&ctx) {
+                Some(video) => video.send(command),
+                None => self.blur_on = false,
+            }
+            if !self.blur_on {
+                self.blur_perf = None;
+                if self.notice.starts_with("Modo rendimiento") {
+                    self.notice.clear();
+                }
+            }
         }
-        self.dirty |= toggle(ui, &mut self.mic_on, "Micrófono").changed();
-        if self.mic_on {
-            level_meter(ui, self.meter_level(false));
-            let mic_label = self
-                .mics
-                .iter()
-                .find(|item| Some(&item.id) == self.mic.as_ref())
-                .map(|item| item.name.clone())
-                .unwrap_or_else(|| "Elegir micrófono".into());
+        ui.add_enabled_ui(self.blur_on, |ui| {
+            let mut percent = (self.blur_strength * 100.0).round();
+            let shown = format!("{percent:.0} %");
+            if widgets::slider(ui, "Fuerza", &mut percent, 0.0..=100.0, &shown) {
+                self.blur_strength = percent / 100.0;
+                self.dirty = true;
+                if let Some(video) = &self.video {
+                    video.send(Command::Blur { on: true, strength: self.blur_strength });
+                }
+            }
+        });
+    }
+
+    fn record_ui(&mut self, ui: &mut egui::Ui) {
+        widgets::section_title(ui, "GRABACIÓN");
+        ui.add_space(4.0);
+        self.ensure_monitors();
+        let name = widgets::field_label(ui, "Monitor");
+        let label = self.monitor_label();
+        egui::ComboBox::from_id_salt("monitor")
+            .width(ui.available_width())
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                self.ensure_monitors();
+                for item in &self.monitors {
+                    let selected = self.monitor.as_ref() == Some(&item.id);
+                    if ui.selectable_label(selected, monitor_text(item)).clicked() {
+                        self.monitor = Some(item.id.clone());
+                        self.monitor_size = Some((item.width, item.height));
+                        self.dirty = true;
+                    }
+                }
+            })
+            .response
+            .labelled_by(name.id);
+        ui.add_space(6.0);
+        let level = if self.system_audio { self.meter_level(true) } else { 0.0 };
+        self.dirty |= widgets::checkbox(ui, &mut self.system_audio, "Audio del sistema", Icon::Speaker, &level_db(level)).changed();
+        widgets::level_meter(ui, level);
+        ui.add_space(6.0);
+        let level = if self.mic_on { self.meter_level(false) } else { 0.0 };
+        self.dirty |= widgets::checkbox(ui, &mut self.mic_on, "Micrófono", Icon::Mic, &level_db(level)).changed();
+        widgets::level_meter(ui, level);
+        let mic_label = self
+            .mics
+            .iter()
+            .find(|item| Some(&item.id) == self.mic.as_ref())
+            .map(|item| item.name.clone())
+            .unwrap_or_else(|| "Comunicaciones predeterminado".into());
+        ui.add_enabled_ui(self.mic_on, |ui| {
             egui::ComboBox::from_id_salt("microfono")
                 .width(ui.available_width())
+                .truncate()
                 .selected_text(mic_label)
                 .show_ui(ui, |ui| {
+                    // WASAPI recién se abre al desplegar la lista o al grabar.
                     if self.mics.is_empty() {
                         self.mics = microphones();
                         if self.mic.is_none() {
@@ -322,22 +367,73 @@ impl CamdeskApp {
                         }
                     }
                 });
+        });
+        ui.label(
+            egui::RichText::new("El micrófono no sale por los parlantes. Los efectos no tocan la grabación.")
+                .font(theme::body(11.0))
+                .color(theme::MUTED),
+        );
+    }
+
+    fn controls(&mut self, ui: &mut egui::Ui) {
+        widgets::section_title(ui, "CONTROLES");
+        ui.add_space(4.0);
+        let (label, action) = if !self.connected {
+            ("Conectar", Action::Primary)
+        } else if self.shown_status() == "Conectando" || self.status == "Teléfono no autorizado" {
+            ("Cancelar", Action::Neutral)
+        } else {
+            ("Desconectar", Action::Neutral)
+        };
+        if widgets::big_button(ui, label, action).clicked() {
+            if !self.connected {
+                self.connect(ui.ctx());
+            } else {
+                self.disconnect();
+            }
         }
+        ui.add_space(2.0);
         let recording = self.recording.is_some();
-        let label = if recording { "Detener" } else { "Grabar" };
-        let kind = if recording { Action::Danger } else { Action::Quiet };
-        if action_button(ui, label, kind).clicked() {
+        let (label, action) = if recording { ("Detener", Action::Stop) } else { ("Grabar", Action::Record) };
+        if widgets::big_button(ui, label, action).clicked() {
             if recording {
                 self.stop_recording();
             } else {
                 self.start_recording();
             }
         }
-        if let Some(rec) = &self.recording {
-            if let Some(error) = rec.error() {
-                self.notice = error;
-            }
+        if let Some(error) = self.recording.as_ref().and_then(|rec| rec.error()) {
+            self.notice = error;
         }
+        ui.add_space(6.0);
+        self.notice_box(ui);
+    }
+
+    fn notice_box(&self, ui: &mut egui::Ui) {
+        let text = if !self.notice.is_empty() {
+            self.notice.as_str()
+        } else if !self.connected && self.recording.is_none() {
+            "Listo para conectar\nConectar el teléfono por USB o Wi-Fi. Nada se carga hasta entonces."
+        } else {
+            return;
+        };
+        let (title, body) = text.split_once('\n').unwrap_or((text, ""));
+        let (fill, border, color) = Tone::of(title).colors();
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0_f32, border))
+            .corner_radius(8.0)
+            .inner_margin(egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.add(egui::Label::new(egui::RichText::new(title).font(theme::semibold(13.0)).color(color)).wrap());
+                if !body.is_empty() {
+                    // La ruta del MP4 va en monoespaciada.
+                    let font = if title == "Grabación guardada" { theme::mono(12.0) } else { theme::body(12.0) };
+                    ui.add(egui::Label::new(egui::RichText::new(body).font(font).color(theme::TEXT_SOFT)).wrap());
+                }
+            });
     }
 
     /// Crea el hilo de video la primera vez que hace falta: al conectar o al prender el desenfoque.
@@ -510,8 +606,7 @@ impl CamdeskApp {
                 if self.blur_unavailable() {
                     self.notice.clear();
                 } else {
-                    self.notice = "En vivo
-La vista previa y cellCam reciben la imagen. La grabación no.".into();
+                    self.notice = "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into();
                 }
             }
         } else {
@@ -519,22 +614,18 @@ La vista previa y cellCam reciben la imagen. La grabación no.".into();
         }
         // Con Incompatible y Ocupado link no reintenta y el hilo de video ya soltó la sesión.
         if matches!(status, Status::Incompatible) {
-            self.notice = "Versión incompatible
-cellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk.".into();
+            self.notice = "Versión incompatible\ncellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk.".into();
             self.connected = false;
         }
         if matches!(status, Status::Ocupado) {
-            self.notice = "Teléfono ocupado
-Otro cliente ya está conectado. Cerrar OBS y volver a conectar.".into();
+            self.notice = "Teléfono ocupado\nOtro cliente ya está conectado. Cerrar OBS y volver a conectar.".into();
             self.connected = false;
         }
         if matches!(status, Status::NoAutorizado) {
-            self.notice = "Teléfono no autorizado
-Aceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos.".into();
+            self.notice = "Teléfono no autorizado\nAceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos.".into();
         }
         if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
-            self.notice = "Último cuadro
-Si se corta la red, la cámara virtual no pasa a negro.".into();
+            self.notice = LAST_FRAME.into();
         }
         let hold_unauthorized = matches!(status, Status::Conectando)
             && self.notice.starts_with("Teléfono no autorizado")
@@ -569,8 +660,7 @@ Si se corta la red, la cámara virtual no pasa a negro.".into();
             || self.notice.starts_with("Teléfono vertical")
             || self.notice.starts_with("Modo rendimiento");
         if replace {
-            self.notice = "Modo rendimiento
-El desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
+            self.notice = "Modo rendimiento\nEl desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
         }
     }
 
@@ -588,53 +678,71 @@ El desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
             return;
         }
         self.notice = if height > width {
-            "Teléfono vertical
-La vista previa muestra el teléfono. Las barras las agrega Zoom.".into()
+            "Teléfono vertical\nLa vista previa muestra el teléfono. Las barras las agrega Zoom.".into()
         } else {
-            "En vivo
-La vista previa y cellCam reciben la imagen. La grabación no.".into()
+            "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into()
         };
     }
 
-    fn preview_pane(&self, ui: &mut egui::Ui) {
-        let available = ui.available_size();
-        let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
-        let caption = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 22.0), rect.right_bottom());
-        let canvas = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), caption.top())).shrink(8.0);
+    /// La vista previa vive en un marco 16:9, el formato de la cámara virtual.
+    fn stage(&self, ui: &mut egui::Ui) {
+        let area = ui.available_rect_before_wrap();
+        ui.allocate_rect(area, egui::Sense::hover());
+        let caption_height = 24.0;
+        let width = area.width().min(theme::PREVIEW_MAX_WIDTH).min((area.height() - caption_height) * 16.0 / 9.0).max(160.0);
+        let size = egui::vec2(width, width * 9.0 / 16.0);
+        let top = area.center().y - (size.y + caption_height) * 0.5;
+        let frame = egui::Rect::from_min_size(egui::pos2(area.center().x - size.x * 0.5, top), size);
+        let painter = ui.painter();
+        painter.rect_filled(frame, 10.0, theme::VIEWPORT);
         let live = self.status.starts_with("En vivo");
         let frozen = self.status == "Desconectado" && self.preview.is_some();
-        if (live || frozen) && self.paint_frame(ui, canvas) {
-            // La imagen ya está pintada.
-        } else {
-            let galley = ui.painter().layout(self.empty_copy(), egui::FontId::proportional(14.0), MUTED, canvas.width().min(420.0));
-            ui.painter().galley(canvas.center() - galley.size() * 0.5, galley, MUTED);
+        let painted = (live || frozen) && self.paint_frame(ui, frame);
+        if !painted {
+            let wrap = (frame.width() - 48.0).min(440.0);
+            let mut job = egui::text::LayoutJob::simple(self.empty_copy(), theme::body(14.0), theme::MUTED, wrap);
+            job.halign = egui::Align::Center;
+            let galley = painter.layout_job(job);
+            let block = 36.0 + 12.0 + galley.size().y;
+            let top = frame.center().y - block * 0.5;
+            widgets::paint_phone(painter, egui::pos2(frame.center().x, top + 18.0));
+            // Centrado: el origen del bloque de texto es su eje.
+            painter.galley(egui::pos2(frame.center().x, top + 48.0), galley, theme::MUTED);
         }
-        ui.painter().text(
-            caption.left_center(),
-            egui::Align2::LEFT_CENTER,
+        painter.rect_stroke(frame, 10.0, egui::Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Outside);
+        let inset = egui::vec2(12.0, 12.0);
+        if painted && live {
+            widgets::badge(painter, frame.left_top() + inset, egui::Align2::LEFT_TOP, theme::LIVE, "EN VIVO", theme::LIVE_TEXT);
+        }
+        if let Some(recording) = &self.recording {
+            let text = format!("REC {}", format_elapsed(recording.elapsed()));
+            let anchor = egui::pos2(frame.right() - inset.x, frame.top() + inset.y);
+            widgets::badge(painter, anchor, egui::Align2::RIGHT_TOP, theme::REC, &text, theme::REC_TEXT);
+        }
+        if painted && frozen {
+            widgets::badge(painter, frame.right_bottom() - inset, egui::Align2::RIGHT_BOTTOM, theme::WARN, "Último cuadro", theme::WARN);
+        }
+        painter.text(
+            egui::pos2(frame.center().x, frame.bottom() + 14.0),
+            egui::Align2::CENTER_CENTER,
             self.caption(),
-            egui::FontId::proportional(12.0),
-            MUTED,
+            theme::mono(12.0),
+            theme::MUTED,
         );
     }
 
-    fn paint_frame(&self, ui: &egui::Ui, canvas: egui::Rect) -> bool {
+    fn paint_frame(&self, ui: &egui::Ui, frame: egui::Rect) -> bool {
         let Some(texture) = &self.preview else { return false };
         let size = texture.size_vec2();
         if size.x <= 0.0 || size.y <= 0.0 {
             return false;
         }
-        let scale = (canvas.width() / size.x).min(canvas.height() / size.y);
-        let fitted = egui::Rect::from_center_size(canvas.center(), egui::vec2(size.x * scale, size.y * scale));
+        let scale = (frame.width() / size.x).min(frame.height() / size.y);
+        let fitted = egui::Rect::from_center_size(frame.center(), size * scale);
+        let radius = if fitted.width() >= frame.width() - 1.0 { 10 } else { 0 };
         egui::Image::from_texture(texture)
-            .corner_radius(egui::CornerRadius::same(12))
+            .corner_radius(egui::CornerRadius::same(radius))
             .paint_at(ui, fitted);
-        if self.recording.is_some() {
-            paint_badge(ui, fitted.left_top() + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, "REC", REC);
-        }
-        if self.status == "Desconectado" {
-            paint_badge(ui, fitted.right_bottom() - egui::vec2(12.0, 12.0), egui::Align2::RIGHT_BOTTOM, "Último cuadro", WARN);
-        }
         true
     }
 
@@ -745,9 +853,9 @@ La vista previa y cellCam reciben la imagen. La grabación no.".into()
             Ok(recording) => {
                 self.recording = Some(recording);
                 self.notice = if self.status.starts_with("En vivo") {
-                    "Grabando 00:00\nGraba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes.".into()
+                    "Grabando 00:00\nGraba el monitor. No usa el teléfono ni los efectos.".into()
                 } else {
-                    "Grabando sin cámara\nLa grabación es otro trabajo. Empieza aunque no haya teléfono.".into()
+                    "Grabando sin cámara\nLa grabación es otro trabajo: graba el monitor aunque cellCam no tenga imagen.".into()
                 };
             }
             Err(error) => self.notice = error.message,
@@ -767,9 +875,7 @@ La vista previa y cellCam reciben la imagen. La grabación no.".into()
         let Some(recording) = &self.recording else { return };
         if self.status.starts_with("En vivo") && self.notice.starts_with("Grabando ") {
             let elapsed = format_elapsed(recording.elapsed());
-            self.notice = format!(
-                "Grabando {elapsed}\nGraba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes."
-            );
+            self.notice = format!("Grabando {elapsed}\nGraba el monitor. No usa el teléfono ni los efectos.");
         }
     }
 
@@ -844,53 +950,75 @@ La vista previa y cellCam reciben la imagen. La grabación no.".into()
     }
 }
 
+impl CamdeskApp {
+    fn header(&self, ui: &mut egui::Ui) {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            widgets::logo(ui);
+            ui.label(egui::RichText::new("Camdesk").font(theme::semibold(14.0)));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // La cámara vive hasta cerrar la ventana, aunque se desconecte el teléfono.
+                let (color, text) = if self.vcam.is_some() {
+                    (theme::LIVE, "cellCam activa en Zoom y Meet")
+                } else {
+                    (theme::OFF, "cellCam en espera")
+                };
+                widgets::pill(ui, color, text);
+            });
+        });
+    }
+
+    fn footer(&self, ui: &mut egui::Ui) {
+        let small = |text: &str, color: egui::Color32| egui::RichText::new(text).font(theme::mono(11.0)).color(color);
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let shown = self.shown_status();
+            let color = if shown == "Desconectado" && self.preview.is_some() { theme::WARN } else { theme::status_dot(shown) };
+            widgets::dot(ui, color);
+            ui.label(small(shown, theme::TEXT_SOFT));
+            ui.add_space(12.0);
+            ui.label(small("cellCam 1920×1080 NV12 · 30 fps", theme::TEXT_SOFT));
+            if let Some(recording) = &self.recording {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(small(&encoder_label(recording.encoder()), theme::TEXT_SOFT));
+                    ui.add_space(12.0);
+                    ui.label(small(&format!("REC {}", format_elapsed(recording.elapsed())), theme::REC_TEXT));
+                });
+            }
+        });
+    }
+}
+
 impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.refresh_recording_notice();
-        self.rail(ctx);
-        if !self.notice.is_empty() {
-            egui::TopBottomPanel::top("aviso")
-                .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(18, 8)))
-                .show_separator_line(false)
-                .show(ctx, |ui| {
-                    let (lead, body) = self.notice.split_once('\n').unwrap_or((self.notice.as_str(), ""));
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(lead).strong().color(notice_color(lead)));
-                        if !body.is_empty() {
-                            ui.label(egui::RichText::new(body).color(MUTED));
-                        }
-                    });
-                });
-        }
-        egui::TopBottomPanel::bottom("estado")
-            .exact_height(36.0)
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(18, 0)))
-            .show_separator_line(true)
+        let bar = |fill: egui::Color32| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(16, 0));
+        egui::TopBottomPanel::top("cabecera")
+            .exact_height(theme::HEADER_HEIGHT)
+            .frame(bar(theme::TITLEBAR))
+            .show(ctx, |ui| self.header(ui));
+        egui::TopBottomPanel::bottom("pie")
+            .exact_height(theme::FOOTER_HEIGHT)
+            .frame(bar(theme::FOOTER))
+            .show(ctx, |ui| self.footer(ui));
+        // Los docks piden su alto. En una ventana baja se quedan con una parte y se desplazan.
+        let room = ctx.screen_rect().height() - theme::HEADER_HEIGHT - theme::FOOTER_HEIGHT;
+        let height = self.dock_height.min(room * 0.64);
+        let mut wanted = self.dock_height;
+        egui::TopBottomPanel::bottom("docks")
+            .exact_height(height)
+            .frame(egui::Frame::new().fill(theme::PANEL))
             .show(ctx, |ui| {
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new("cellCam").color(MUTED));
-                    let shown = self.shown_status();
-                    let status_tone = if shown == "Desconectado" && self.preview.is_some() {
-                        WARN
-                    } else {
-                        status_color(shown)
-                    };
-                    ui.label(egui::RichText::new(shown).color(status_tone));
-                    if let Some(recording) = &self.recording {
-                        let elapsed = format_elapsed(recording.elapsed());
-                        let encoder = encoder_label(recording.encoder());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(format!("REC  {elapsed}")).color(REC).strong());
-                            ui.add_space(14.0);
-                            ui.label(egui::RichText::new(encoder).color(MUTED));
-                        });
-                    }
-                });
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| wanted = self.docks(ui));
             });
+        if (wanted - self.dock_height).abs() > 0.5 {
+            self.dock_height = wanted;
+            ctx.request_repaint();
+        }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 10)))
-            .show(ctx, |ui| self.preview_pane(ui));
+            .frame(egui::Frame::new().fill(theme::STAGE).inner_margin(egui::Margin::symmetric(16, 14)))
+            .show(ctx, |ui| self.stage(ui));
         if self.dirty {
             self.write_config();
             self.dirty = false;
@@ -904,217 +1032,26 @@ impl eframe::App for CamdeskApp {
     }
 }
 
-const BG: egui::Color32 = egui::Color32::from_rgb(0x12, 0x12, 0x12);
-const FIELD: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1b, 0x1b);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(0xf2, 0xf2, 0xf2);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(0x9c, 0x9c, 0x9c);
-const LIVE: egui::Color32 = egui::Color32::from_rgb(0x3d, 0xba, 0x86);
-const REC: egui::Color32 = egui::Color32::from_rgb(0xe2, 0x3d, 0x3d);
-const WARN: egui::Color32 = egui::Color32::from_rgb(0xd7, 0xa4, 0x41);
-const INFO: egui::Color32 = egui::Color32::from_rgb(0x9e, 0xc0, 0xdc);
-const DANGER: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x7a, 0x7a);
-const INK: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x14);
+const LAST_FRAME: &str = "Último cuadro\nZoom se quedó en esta imagen. La cámara virtual no pasa a negro.";
 
-enum Action {
-    Primary,
-    Quiet,
-    Danger,
-}
-
-fn apply_style(ctx: &egui::Context) {
-    let mut style = (*ctx.style()).clone();
-    style.visuals.dark_mode = true;
-    style.visuals.panel_fill = BG;
-    style.visuals.window_fill = BG;
-    style.visuals.extreme_bg_color = FIELD;
-    style.visuals.faint_bg_color = FIELD;
-    style.visuals.override_text_color = Some(TEXT);
-    style.visuals.hyperlink_color = INFO;
-    style.visuals.selection.bg_fill = egui::Color32::from_rgb(0x2c, 0x2c, 0x2c);
-    style.visuals.selection.stroke = egui::Stroke::NONE;
-    style.visuals.window_stroke = egui::Stroke::NONE;
-    let radius = egui::CornerRadius::same(8);
-    for visuals in [
-        &mut style.visuals.widgets.noninteractive,
-        &mut style.visuals.widgets.inactive,
-        &mut style.visuals.widgets.hovered,
-        &mut style.visuals.widgets.active,
-        &mut style.visuals.widgets.open,
-    ] {
-        visuals.corner_radius = radius;
-        visuals.bg_stroke = egui::Stroke::NONE;
-    }
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(22));
-    style.visuals.widgets.noninteractive.fg_stroke.color = TEXT;
-    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
-    style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
-    style.visuals.widgets.inactive.fg_stroke.color = TEXT;
-    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x32, 0x32, 0x32);
-    style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
-    style.visuals.widgets.hovered.fg_stroke.color = TEXT;
-    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x3a, 0x3a, 0x3a);
-    style.visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0x33, 0x33, 0x33);
-    style.visuals.widgets.active.fg_stroke.color = TEXT;
-    style.visuals.widgets.open.bg_fill = FIELD;
-    style.visuals.widgets.open.fg_stroke.color = TEXT;
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    ctx.set_style(style);
-}
-
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new(title.to_uppercase()).size(11.0).color(MUTED).strong());
-    ui.add_space(2.0);
-}
-
-fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, value: &mut T, options: &[(&str, T)]) -> bool {
-    let mut changed = false;
-    egui::Frame::new()
-        .fill(FIELD)
-        .corner_radius(9.0)
-        .inner_margin(egui::Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.columns(options.len(), |cols| {
-                for (col, (label, option)) in cols.iter_mut().zip(options) {
-                    col.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    let selected = *value == *option;
-                    let text = egui::RichText::new(*label).size(12.0).color(if selected { TEXT } else { MUTED });
-                    let button = egui::Button::new(text)
-                        .fill(if selected { egui::Color32::from_rgb(0x2c, 0x2c, 0x2c) } else { egui::Color32::TRANSPARENT })
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(7.0)
-                        .wrap_mode(egui::TextWrapMode::Extend)
-                        .min_size(egui::vec2(col.available_width(), 28.0));
-                    if col.add(button).clicked() && !selected {
-                        *value = *option;
-                        changed = true;
-                    }
-                }
-            });
-        });
-    changed
-}
-
-fn level_meter(ui: &mut egui::Ui, level: f32) {
-    let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 3.0), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a));
-    let fill = rect.width() * level.clamp(0.0, 1.0);
-    if fill > 0.5 {
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(rect.min, egui::vec2(fill, rect.height())),
-            2.0,
-            LIVE,
-        );
-    }
-}
-
-fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
-    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
-    if response.clicked() {
-        *on = !*on;
-        response.mark_changed();
-    }
-    // Está pintado a mano: sin esto, un lector de pantalla no sabe qué casilla es ni si está prendida.
-    let (enabled, selected) = (ui.is_enabled(), *on);
-    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, selected, label));
-    let painter = ui.painter();
-    painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
-    let switch = egui::Rect::from_center_size(egui::pos2(rect.right() - 17.0, rect.center().y), egui::vec2(34.0, 20.0));
-    let track = if *on { egui::Color32::from_rgb(0x2f, 0x6d, 0x52) } else { egui::Color32::from_rgb(0x2a, 0x2a, 0x2a) };
-    painter.rect_filled(switch, 10.0, track);
-    let knob_x = if *on { switch.right() - 10.0 } else { switch.left() + 10.0 };
-    let knob = if *on { egui::Color32::WHITE } else { egui::Color32::from_rgb(0x9a, 0x9a, 0x9a) };
-    painter.circle_filled(egui::pos2(knob_x, switch.center().y), 7.0, knob);
-    response
-}
-
-fn disclosure(ui: &mut egui::Ui, label: &str, flag: Option<&str>) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
-    let enabled = ui.is_enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
-    let painter = ui.painter();
-    painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
-    if let Some(flag) = flag {
-        painter.text(rect.right_center(), egui::Align2::RIGHT_CENTER, flag, egui::FontId::proportional(12.0), WARN);
-    }
-    response
-}
-
-fn labeled_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, integer: bool) -> bool {
-    let mut slider = egui::Slider::new(value, range).text(label);
-    if integer {
-        slider = slider.integer();
-    }
-    ui.add(slider).changed()
-}
-
-fn action_button(ui: &mut egui::Ui, text: &str, kind: Action) -> egui::Response {
-    let (fill, color, stroke) = match kind {
-        Action::Primary => (egui::Color32::from_rgb(0xf2, 0xf2, 0xf2), INK, egui::Stroke::NONE),
-        Action::Quiet => (egui::Color32::TRANSPARENT, TEXT, egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(36))),
-        Action::Danger => (REC, egui::Color32::WHITE, egui::Stroke::NONE),
-    };
-    ui.add(
-        egui::Button::new(egui::RichText::new(text).color(color).strong())
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(9.0)
-            .min_size(egui::vec2(ui.available_width(), 34.0)),
-    )
-}
-
-fn paint_badge(ui: &egui::Ui, anchor: egui::Pos2, align: egui::Align2, text: &str, color: egui::Color32) {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(11.0), color);
-    let pad = egui::vec2(8.0, 4.0);
-    let rect = align.anchor_size(anchor, galley.size() + pad * 2.0);
-    ui.painter().rect_filled(rect, 10.0, egui::Color32::from_black_alpha(150));
-    ui.painter().galley(rect.min + pad, galley, color);
-}
-
-fn color_adjusted(color: &ColorParams) -> bool {
-    color.brightness.abs() > 0.001 || color.contrast.abs() > 0.001 || color.saturation.abs() > 0.001 || color.temperature.abs() > 0.001
-}
-
-fn status_color(status: &str) -> egui::Color32 {
-    if status.starts_with("En vivo") {
-        LIVE
-    } else if status == "Conectando" {
-        INFO
-    } else if status == "Ocupado" || status == "Teléfono no autorizado" {
-        WARN
-    } else if status == "Versión incompatible" {
-        DANGER
+fn signed(value: f32) -> String {
+    if value > 0.0 {
+        format!("+{value:.0}")
     } else {
-        TEXT
+        format!("{value:.0}")
     }
 }
 
-fn notice_color(text: &str) -> egui::Color32 {
-    let lower = text.to_lowercase();
-    if lower.contains("incompatible") || lower.contains("error") || lower.contains("no hay") {
-        DANGER
-    } else if lower.contains("último cuadro") || lower.contains("ultimo cuadro") {
-        WARN
-    } else if lower.contains("sin cámara") {
-        INFO
-    } else if lower.contains("guardad") || lower.contains("grabando") || lower.starts_with("en vivo") {
-        LIVE
-    } else if lower.contains("falta")
-        || lower.contains("no es válida")
-        || lower.contains("ocup")
-        || lower.contains("autoriz")
-        || lower.contains("nvidia")
-        || lower.contains("runtime")
-        || lower.contains("gpu")
-        || lower.contains("desenfo")
-        || lower.contains("rendimiento")
-    {
-        WARN
+/// `record` entrega el pico de 0 a 1, lineal entre −48 dB y 0 dB.
+fn level_db(level: f32) -> String {
+    if level <= 0.0 {
+        return "−∞ dB".into();
+    }
+    let below = 48.0 * (1.0 - level.min(1.0));
+    if below < 0.5 {
+        "0 dB".into()
     } else {
-        INFO
+        format!("−{below:.0} dB")
     }
 }
 

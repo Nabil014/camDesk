@@ -316,6 +316,8 @@ Español. Controles de la primera versión:
 - Monitor, casillas de audio del sistema y de micrófono, desplegable de micrófono.
 - Grabar / Detener y el tiempo transcurrido.
 
+Diseño vigente: «Camdesk — consola oscura, inspirada en OBS» (lienzo «Camdesk UI»); reemplaza a `docs/camdesk-ux.html`. De arriba abajo: barra con la marca y el estado de la cámara virtual; vista previa en un marco 16:9 con las marcas EN VIVO, REC y «Último cuadro», y el epígrafe debajo; cuatro docks (Conexión, Efectos, Grabación, Controles); pie con el estado, el formato de la cámara y, al grabar, el tiempo y el encoder. Los avisos van en el dock Controles, no arriba. Los tokens están en `app/src/theme.rs`: un solo acento azul para acciones; verde, ámbar y rojo solo para estado. Los controles pintados a mano están en `app/src/widgets.rs` y declaran nombre y estado para el lector de pantalla. Fuentes: Inter y JetBrains Mono si están instaladas en Windows; si no, Segoe UI y Cascadia Mono. No se empaquetan fuentes. La ventana abre en 1280×800 y no baja de 1060×640; en una ventana baja los docks se desplazan.
+
 ## Orden de trabajo
 
 0. Esqueleto del workspace con todos los crates vacíos que compilan (dueño: Aplicación). Copiar `docs/PROTOCOL-v1.md`. Paso 0 de la cámara virtual, en Windows.
