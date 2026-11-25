@@ -61,6 +61,8 @@ struct CamdeskApp {
     resolution: Resolution,
     camera: Camera,
     rotation: Option<Rotation>,
+    /// Imagen del teléfono invertida de izquierda a derecha, en la vista previa y en cellCam.
+    mirror: bool,
     color: ColorParams,
     blur_on: bool,
     blur_strength: f32,
@@ -126,6 +128,7 @@ impl CamdeskApp {
             resolution: Resolution::P720,
             camera: Camera::Back,
             rotation: None,
+            mirror: false,
             color: ColorParams::default(),
             blur_on: false,
             blur_strength: 0.5,
@@ -240,21 +243,34 @@ impl CamdeskApp {
         });
         let previous = self.rotation;
         let (_, selected, _) = ROTATIONS.iter().find(|entry| entry.2 == previous).unwrap();
-        let name = widgets::field_label(ui, "Rotación");
-        egui::ComboBox::from_id_salt("rotacion")
-            .width(ui.available_width())
-            .selected_text(*selected)
-            .show_ui(ui, |ui| {
-                for (_, label, rotation) in ROTATIONS {
-                    ui.selectable_value(&mut self.rotation, rotation, label);
-                }
-            })
-            .response
-            .labelled_by(name.id);
+        let mut mirror_changed = false;
+        ui.columns(2, |cols| {
+            let name = widgets::field_label(&mut cols[0], "Rotación");
+            egui::ComboBox::from_id_salt("rotacion")
+                .width(cols[0].available_width())
+                .selected_text(*selected)
+                .show_ui(&mut cols[0], |ui| {
+                    for (_, label, rotation) in ROTATIONS {
+                        ui.selectable_value(&mut self.rotation, rotation, label);
+                    }
+                })
+                .response
+                .labelled_by(name.id);
+            widgets::field_label(&mut cols[1], "Imagen");
+            // Misma altura que el desplegable de al lado.
+            cols[1].add_space((theme::FIELD_HEIGHT - 22.0) * 0.5);
+            mirror_changed = widgets::checkbox(&mut cols[1], &mut self.mirror, "Espejo", Icon::None, "").changed();
+        });
         if self.rotation != previous {
             self.dirty = true;
             if let Some(video) = &self.video {
                 video.send(Command::Rotation(self.rotation));
+            }
+        }
+        if mirror_changed {
+            self.dirty = true;
+            if let Some(video) = &self.video {
+                video.send(Command::Mirror(self.mirror));
             }
         }
     }
@@ -561,6 +577,7 @@ impl CamdeskApp {
             match Video::spawn(ctx.clone()) {
                 Ok(video) => {
                     video.send(Command::Color(self.color));
+                    video.send(Command::Mirror(self.mirror));
                     self.video = Some(video);
                 }
                 Err(error) => {
@@ -1116,6 +1133,7 @@ impl CamdeskApp {
                     self.resolution = if value.trim() == "1080" { Resolution::P1080 } else { Resolution::P720 }
                 }
                 "camera" => self.camera = if value.trim() == "front" { Camera::Front } else { Camera::Back },
+                "mirror" => self.mirror = value.trim() == "1",
                 "rotation" => {
                     self.rotation = ROTATIONS.iter().find(|entry| entry.0 == value.trim()).and_then(|entry| entry.2);
                 }
@@ -1157,7 +1175,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\nlast_recording={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\nlast_recording={}\nmirror={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -1184,6 +1202,7 @@ impl CamdeskApp {
             self.system_device.as_ref().map_or("", |id| id.0.as_str()),
             self.system_device_name,
             self.last_recording.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+            if self.mirror { "1" } else { "0" },
         );
         let _ = std::fs::write(path, text);
     }

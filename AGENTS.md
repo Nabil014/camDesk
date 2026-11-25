@@ -54,7 +54,7 @@ Nadie edita el crate de otro. La integración vive solo en `app`. `desktop/Cargo
 - La grabación usa encoder de hardware (NVENC, AMF, Quick Sync) y `h264_mf` como último recurso. No se usa `libx264`. FFmpeg es build LGPL.
 - La grabación es a 30 fps constantes, en MP4 fragmentado, y rellena con silencio cuando el loopback no entrega audio.
 - El micrófono de la grabación no se reproduce por los parlantes.
-- Orden de efectos por frame: rotación → desenfoque de fondo → corrección de color → preview y lienzo. Los efectos no tocan la grabación de pantalla.
+- Orden de efectos por frame: rotación → desenfoque de fondo → corrección de color → espejo → preview y lienzo. Los efectos no tocan la grabación de pantalla.
 - Un efecto que falla se apaga y avisa; nunca corta la cámara virtual. Sin RTX o sin runtime, el desenfoque queda deshabilitado con el motivo, sin respaldo.
 - Al abrir la ventana no se carga FFmpeg (carga diferida), no se carga el runtime de NVIDIA, no se registra la cámara virtual, no se crea el archivo mapeado, no se corre adb, no se abre WASAPI y no se captura la pantalla. Eso ocurre al conectar, al grabar, al activar el desenfoque o al marcar la vista previa de la pantalla, que no se recuerda entre sesiones.
 - Textos de la interfaz en español.

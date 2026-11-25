@@ -27,6 +27,7 @@ pub enum Command {
     Start(SessionConfig),
     Stop,
     Rotation(Option<Rotation>),
+    Mirror(bool),
     Color(ColorParams),
     Blur { on: bool, strength: f32 },
     Quit,
@@ -98,6 +99,7 @@ struct Worker {
     writer: Option<vcam_shm::Writer>,
     color: ColorCorrector,
     rotation: Option<Rotation>,
+    mirror: bool,
     blur: Option<BackgroundBlur>,
     blur_notice: Option<String>,
     last_keyframe_request: Option<Instant>,
@@ -118,6 +120,7 @@ impl Worker {
             writer: None,
             color: ColorCorrector::new(),
             rotation: None,
+            mirror: false,
             blur: None,
             blur_notice: None,
             last_keyframe_request: None,
@@ -184,6 +187,7 @@ impl Worker {
             }
             Command::Stop => self.close_session(),
             Command::Rotation(rotation) => self.rotation = rotation,
+            Command::Mirror(on) => self.mirror = on,
             Command::Color(params) => self.color.set(params),
             Command::Blur { on: false, .. } => {
                 self.blur = None;
@@ -284,7 +288,7 @@ impl Worker {
         }
     }
 
-    /// Rotación (ya hecha por decode) → desenfoque → color → vista previa y lienzo.
+    /// Rotación (ya hecha por decode) → desenfoque → color → espejo → vista previa y lienzo.
     fn publish(&mut self, mut decoded: decode::Decoded) {
         let width = decoded.width as usize;
         let height = decoded.height as usize;
@@ -306,6 +310,10 @@ impl Worker {
             }
         }
         self.color.apply(&mut decoded.bgra, width, height, stride);
+        // Al final: el modelo del desenfoque ve la imagen tal como salió de la cámara.
+        if self.mirror {
+            mirror_bgra(&mut decoded.bgra, width);
+        }
         self.write_canvas(&decoded);
         self.store_preview(&decoded);
     }
@@ -342,5 +350,38 @@ impl Worker {
     fn report(&self, report: Report) {
         let _ = self.reports.send(report);
         self.ctx.request_repaint();
+    }
+}
+
+/// Invierte izquierda y derecha, fila por fila, sin copiar el cuadro.
+fn mirror_bgra(bgra: &mut [u8], width: usize) {
+    if width == 0 {
+        return;
+    }
+    for row in bgra.chunks_exact_mut(width * 4) {
+        for x in 0..width / 2 {
+            for channel in 0..4 {
+                row.swap(x * 4 + channel, (width - 1 - x) * 4 + channel);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn el_espejo_invierte_cada_fila_sin_mezclar_canales() {
+        // 3x2: cada píxel lleva su número en los cuatro canales, más el canal.
+        let pixel = |id: u8| [id * 10, id * 10 + 1, id * 10 + 2, id * 10 + 3];
+        let image = |ids: [u8; 6]| ids.iter().flat_map(|id| pixel(*id)).collect::<Vec<u8>>();
+        let mut frame = image([1, 2, 3, 4, 5, 6]);
+        mirror_bgra(&mut frame, 3);
+        assert_eq!(frame, image([3, 2, 1, 6, 5, 4]));
+        mirror_bgra(&mut frame, 3);
+        assert_eq!(frame, image([1, 2, 3, 4, 5, 6]), "dos veces deja todo igual");
+        mirror_bgra(&mut frame, 0);
+        assert_eq!(frame, image([1, 2, 3, 4, 5, 6]));
     }
 }

@@ -184,7 +184,7 @@ La cámara virtual es siempre **1920x1080 NV12 a 30 fps**. No cambia con la rota
 
 ## Efectos
 
-Orden fijo por frame: decode → rotación → desenfoque de fondo → corrección de color → preview y lienzo NV12. `app` hace la cadena llamando a `decode` y a `fx`. El desenfoque va después de la rotación porque el modelo espera a la persona derecha, y antes del color para que la segmentación vea la imagen original.
+Orden fijo por frame: decode → rotación → desenfoque de fondo → corrección de color → espejo → preview y lienzo NV12. `app` hace la cadena llamando a `decode` y a `fx`. El desenfoque va después de la rotación porque el modelo espera a la persona derecha, y antes del color para que la segmentación vea la imagen original.
 
 Los efectos afectan a la preview y a la cámara virtual. No afectan a la grabación de pantalla. Los ajustes se recuerdan entre sesiones en `%LOCALAPPDATA%\Camdesk\config.toml` (dueño: `app`).
 
@@ -328,6 +328,7 @@ Español. Controles de la primera versión:
 - Preview de la imagen ya rotada.
 - Selector Rotación. Automática aplica los metadatos del teléfono; 0°, 90°, 180° o 270° fijan el ángulo para la preview y la cámara virtual. Se puede cambiar en vivo y se guarda en la configuración.
 - Estado: conectando, en vivo, desconectado, ocupado (otro cliente conectado al teléfono), teléfono no autorizado (aceptar la depuración USB), versión incompatible.
+- Casilla «Espejo», al lado de «Rotación»: invierte de izquierda a derecha la imagen del teléfono, en la vista previa y en cellCam, así que quien mira la reunión también la ve invertida. Apagada por defecto, se recuerda (`mirror`) y no toca la grabación de pantalla. Vive en `app/src/video.rs`.
 - Efectos: casilla "Desenfocar fondo" y su fuerza (deshabilitada con el motivo si no hay RTX o runtime). Sliders de brillo, contraste, saturación y temperatura, y botón Restablecer.
 - Monitor, casillas de audio del sistema y de micrófono, desplegable de salida de audio y de micrófono.
 - Grabar / Detener y el tiempo transcurrido.
