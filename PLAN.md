@@ -136,12 +136,16 @@ pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos);
 pub const WIDTH: u32 = 1920; pub const HEIGHT: u32 = 1080; pub const STRIDE: u32 = 1920;
 pub fn default_path() -> std::path::PathBuf;    // %ProgramData%\Camdesk\cellcam-vcam.bin
 pub struct FrameInfo { pub pts_100ns: i64, pub sequence: u64 }
-pub struct Writer;                 // create(path) -> io::Result; write(pts_100ns, |y, uv| …)
+pub struct Writer;                 // create(path) -> io::Result; open_existing(path); write(pts_100ns, |y, uv| …)
 pub struct Reader;                 // open(path) -> io::Result; read_latest(&mut y, &mut uv) -> Option<FrameInfo>
 // El lector solo hace loads Acquire. No usa InterlockedCompareExchange sobre el mapa de solo lectura.
 
-// vcam (rlib) — vacío hasta el paso 2
-pub struct VirtualCamera;          // create() -> windows::core::Result; Drop = baja
+// vcam (rlib). create() no corre al abrir la ventana: lo llama app en el paso 3.
+pub struct VcamError { pub message: String }
+pub struct VirtualCamera;          // create() -> Result<Self, VcamError>; Drop = Stop, Remove, Shutdown
+// DLL copiada a %ProgramData%\Camdesk\cellcam.dll, con lectura y ejecución para LOCAL SERVICE.
+// Log al lado del archivo mapeado: cellcam-vcam.log. CLSID {8F4E2A11-6C3D-4B9E-9170-2A5B8C4D6E11} en HKLM.
+// La primera vez HKLM pide administrador. Remove no borra esa clave. Sin el archivo mapeado, la cámara entrega negro.
 
 // record — no conoce cellCam
 pub struct MonitorId(pub String);  // índice de monitor, en base 1
@@ -220,9 +224,9 @@ Seqlock. Las `sequence` se acceden como `AtomicU64` (offsets alineados a 8) y `s
 
 Escritor (un solo hilo):
 1. `s` = el slot que **no** es el activo.
-2. `seq[s] += 1` (queda impar), luego `fence(Release)`.
+2. Publicar una sequence par mayor que la de los dos slots (el contador es global; si cada slot solo suma 2, los dos quedan en el mismo número y el lector cree que el cuadro no cambió). Guardarla impar (`+1` pendiente) con `Release`.
 3. Escribir NV12 y `pts[s]`.
-4. `seq[s] += 1` (queda par) con `Release`.
+4. Guardar la sequence par con `Release`.
 5. `activo = s` con `Release`.
 
 Lector:
@@ -242,7 +246,7 @@ Windows 11 build 22000 o más nuevo (la máquina de prueba es 26200). `MFCreateV
 - Nombre: `cellCam`. Cómo lo muestran Zoom y Meet se anota tras el paso 0.
 - `MFVirtualCameraLifetime_Session` y `MFVirtualCameraAccess_CurrentUser`. Existe mientras Camdesk está abierto.
 - La DLL del crate `vcam` es el `IMFMediaSource`. **No corre en el proceso de Camdesk**: la carga el servicio Frame Server (`svchost`, cuenta `LOCAL SERVICE`). Consecuencias: no puede usar `%LOCALAPPDATA%` del usuario, no puede leer archivos con ACL del perfil del usuario, y su registro COM tiene que ser visible para ese servicio.
-- Entrega NV12 1920x1080 con timestamps desde cero: `frame * 1/30 s`, y clean point en cada muestra, para que Meet no congele la imagen. El `pts` de la memoria compartida es informativo; el reloj de la cámara es el del contador de frames.
+- Entrega NV12 1920x1080 a 30 fps, con clean point en cada muestra. El tiempo de la muestra es el origen más `frame * 1/30 s`. Si `Start` trae la posición en `VT_I8`, ese valor es el origen. Si viene vacía, el origen es `MFGetSystemTime()` tomado una vez en `Start`: un cero absoluto queda en el pasado y Frame Server descarta todas las muestras. `RequestSample` espera a que ese tiempo esté vencido, así el contador no se adelanta al reloj. El `pts` de la memoria compartida es informativo.
 - Log de la DLL: `OutputDebugString` y un archivo junto al archivo mapeado. No hay otra forma de depurar dentro de Frame Server.
 
 ### Paso 0 — prueba de la cámara virtual (antes de escribir `vcam`)
@@ -264,6 +268,8 @@ Resultados del paso 0, en esta PC (Windows 11 build 26200). El usuario eligió a
 4. Zoom no está instalado. En Chrome el selector lista `cellCam (Windows Virtual Camera)` junto a `OBS Virtual Camera`. `getUserMedia` sobre cellCam devolvió `NotReadableError`. En ese intento Frame Server igual inicializó el dispositivo con `hr` 0, una secuencia, 1920x1080 y 30 fps. La página no mostró la barra: siguió con OBS Virtual Camera. Meet no se abrió. La aplicación Cámara de Windows, abierta con la sesión ya cerrándose, respondió `0xA00F4244` (`NoCamerasAreAttached`).
 
 El crate `vcam` sigue vacío. El CLSID de `HKLM` no quedó registrado. No quedaron la DLL ni el archivo mapeado en `%ProgramData%\Camdesk` ni en `%ProgramFiles%\Camdesk`. El lector del crate `vcam-shm` no puede usar una operación que escribe sobre el mapeo de solo lectura: es lo que tumbó a Frame Server.
+
+El paso 2 usa ese resultado. La DLL del crate es `IMFMediaSource` en Rust y lee NV12 con `vcam_shm::Reader`. El origen del reloj es la posición de `Start` si viene en `VT_I8`, y si no `MFGetSystemTime()` de ese arranque; cada muestra suma `frame * 1/30 s` y lleva clean point. Se copia a `%ProgramData%\Camdesk\cellcam.dll`. El CLSID `{8F4E2A11-6C3D-4B9E-9170-2A5B8C4D6E11}` queda en `HKLM` después del alta: `Remove` no lo borra, y la siguiente vez no pide administrador. En esta PC, un lector de Media Foundation listó `cellCam (Windows Virtual Camera)` y vio la barra pasar de la columna 200 a la 900. Zoom no está instalado y Meet no se abrió. `app` todavía no llama a `VirtualCamera::create()`.
 
 ## Grabación
 

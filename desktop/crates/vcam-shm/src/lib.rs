@@ -51,6 +51,10 @@ pub fn default_path() -> PathBuf {
 pub struct Writer {
     _file: std::fs::File,
     map: MmapMut,
+    /// Última sequence par publicada. El siguiente frame usa este valor + 2.
+    /// Es global, no por slot: si cada slot suma 2 por su cuenta, los dos
+    /// quedan en el mismo número y el lector repite el cuadro anterior.
+    next_seq: u64,
 }
 
 impl Writer {
@@ -82,7 +86,26 @@ impl Writer {
             active_mut(map.as_mut_ptr()).store(0, Ordering::Release);
         }
         map.flush()?;
-        Ok(Self { _file: file, map })
+        Ok(Self { _file: file, map, next_seq: 2 })
+    }
+
+    /// Abre un archivo que ya tiene el tamaño y la cabecera. No lo trunca:
+    /// otro proceso puede tenerlo mapeado.
+    pub fn open_existing(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        if file.metadata()?.len() < FILE_BYTES as u64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "archivo corto"));
+        }
+        let map = unsafe { MmapMut::map_mut(&file)? };
+        if !header_ok(&map) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "cabecera"));
+        }
+        let next_seq = unsafe {
+            let base = map.as_ptr() as *mut u8;
+            let highest = seq_mut(base, 0).load(Ordering::Acquire).max(seq_mut(base, 1).load(Ordering::Acquire));
+            highest + (highest & 1)
+        };
+        Ok(Self { _file: file, map, next_seq })
     }
 
     pub fn write<F>(&mut self, pts_100ns: i64, fill: F) -> io::Result<()>
@@ -94,8 +117,10 @@ impl Writer {
             let active = active_mut(base).load(Ordering::Acquire);
             if active == 0 { 1 } else { 0 }
         };
+        let published = self.next_seq.wrapping_add(2);
+        self.next_seq = published;
         unsafe {
-            seq_mut(base, slot).fetch_add(1, Ordering::Release);
+            seq_mut(base, slot).store(published - 1, Ordering::Release);
         }
         {
             let range = slot_range(slot);
@@ -105,7 +130,7 @@ impl Writer {
         }
         unsafe {
             pts_mut(base, slot).store(pts_100ns, Ordering::Release);
-            seq_mut(base, slot).fetch_add(1, Ordering::Release);
+            seq_mut(base, slot).store(published, Ordering::Release);
             active_mut(base).store(slot as u32, Ordering::Release);
         }
         Ok(())
@@ -191,7 +216,7 @@ impl Reader {
     }
 }
 
-fn header_ok(map: &Mmap) -> bool {
+fn header_ok(map: &[u8]) -> bool {
     if map.len() < FILE_BYTES {
         return false;
     }
@@ -341,6 +366,15 @@ mod tests {
         let mut uv = vec![0; UV_BYTES];
         let info = reader.read_latest(&mut y, &mut uv).unwrap();
         assert_eq!(y[0], 7, "no se ve la escritura seq={}", info.sequence);
+        writer
+            .write(100, |y, uv| {
+                y.fill(9);
+                uv.fill(128);
+            })
+            .unwrap();
+        let info = reader.read_latest(&mut y, &mut uv).unwrap();
+        assert_eq!(y[0], 9, "el segundo frame se repitió como el primero seq={}", info.sequence);
+        assert_ne!(info.sequence, 4);
         let barrier = Arc::new(Barrier::new(2));
         let barrier_w = barrier.clone();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));

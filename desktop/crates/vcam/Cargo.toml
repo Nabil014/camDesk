@@ -5,3 +5,21 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vcam-shm = { path = "../vcam-shm" }
+windows-core = "0.61"
+windows = { version = "0.61", features = [
+    "Win32_Devices_Properties",
+    "Win32_Foundation",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_MediaFoundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Registry",
+    "Win32_System_Variant",
+] }
