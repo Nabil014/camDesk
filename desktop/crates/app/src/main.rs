@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use eframe::egui;
 use fx::{BackgroundBlur, BlurAvailability, ColorCorrector, ColorParams, blur_availability};
-use link::{Camera, Event, Mode, Resolution, Session, SessionConfig, Status};
+use link::{Camera, Event, Mode, Resolution, Session, SessionConfig, Status, Transport};
 use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
 
 fn main() -> eframe::Result<()> {
@@ -49,6 +49,7 @@ struct CamdeskApp {
     monitor_size: Option<(u32, u32)>,
     mic: Option<MicId>,
     status: String,
+    live_transport: Option<Transport>,
     notice: String,
     session: Option<Session>,
     events: Option<Receiver<Event>>,
@@ -93,6 +94,7 @@ impl CamdeskApp {
             monitor_size: None,
             mic: None,
             status: "Desconectado".into(),
+            live_transport: None,
             notice: String::new(),
             session: None,
             events: None,
@@ -404,7 +406,8 @@ impl CamdeskApp {
                             decoder.reset();
                         }
                     }
-                    if let Status::EnVivo { camera, .. } = status {
+                    if let Status::EnVivo { camera, transport, .. } = status {
+                        self.live_transport = Some(transport);
                         if camera != self.camera {
                             self.camera = camera;
                             self.dirty = true;
@@ -415,6 +418,8 @@ impl CamdeskApp {
                         } else if self.notice.starts_with("Conectando") {
                             self.notice.clear();
                         }
+                    } else {
+                        self.live_transport = None;
                     }
                     if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
                         self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
@@ -577,10 +582,13 @@ impl CamdeskApp {
             Camera::Back => "Trasera",
             Camera::Front => "Frontal",
         };
-        let link = match self.mode {
-            LinkMode::Auto => "Automática",
-            LinkMode::Usb => "USB",
-            LinkMode::Wifi => "Wi-Fi",
+        let link = match self.live_transport {
+            Some(Transport::Usb) => "USB",
+            Some(Transport::Wifi) => "Wi-Fi",
+            None => match self.mode {
+                LinkMode::Wifi => "Wi-Fi",
+                _ => "USB",
+            },
         };
         let bars = if size.y > size.x { " con barras" } else { "" };
         format!("{}×{} · {cam} · {link} · Zoom recibe 1920×1080{bars}", size.x as u32, size.y as u32)

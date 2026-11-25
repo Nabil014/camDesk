@@ -41,10 +41,16 @@ pub struct SessionConfig {
     pub wifi: Option<Ipv4Addr>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    Usb,
+    Wifi,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Conectando,
-    EnVivo { width: u32, height: u32, camera: Camera },
+    EnVivo { width: u32, height: u32, camera: Camera, transport: Transport },
     Desconectado,
     Ocupado,
     NoAutorizado,
@@ -126,6 +132,7 @@ fn attempt(
         Target::Ready { addr, forward } => (addr, forward),
     };
     let (addr, forward) = target;
+    let transport = if forward.is_some() { Transport::Usb } else { Transport::Wifi };
     let stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
         Ok(stream) => stream,
         Err(_) => {
@@ -138,7 +145,7 @@ fn attempt(
         return Attempt::Stop;
     }
     let _ = stream.set_nodelay(true);
-    let outcome = talk(cfg, stream, stop, keyframe, tx);
+    let outcome = talk(cfg, stream, stop, keyframe, tx, transport);
     clear_forward(&forward);
     outcome
 }
@@ -269,6 +276,7 @@ fn talk(
     stop: &AtomicBool,
     keyframe: &AtomicBool,
     tx: &SyncSender<Event>,
+    transport: Transport,
 ) -> Attempt {
     let (width, height) = match cfg.resolution {
         Resolution::P720 => (1280, 720),
@@ -289,7 +297,7 @@ fn talk(
     let status = match parsed.status {
         protocol::HandshakeStatus::Ok | protocol::HandshakeStatus::Adjusted => {
             let camera = if parsed.camera == 1 { Camera::Front } else { Camera::Back };
-            Status::EnVivo { width: parsed.width, height: parsed.height, camera }
+            Status::EnVivo { width: parsed.width, height: parsed.height, camera, transport }
         }
         protocol::HandshakeStatus::Version | protocol::HandshakeStatus::Codec => Status::Incompatible,
         protocol::HandshakeStatus::Camera => Status::Ocupado,
@@ -485,7 +493,7 @@ mod tests {
         let event = recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
         assert_eq!(
             event,
-            Event::Status(Status::EnVivo { width: 640, height: 480, camera: Camera::Back })
+            Event::Status(Status::EnVivo { width: 640, height: 480, camera: Camera::Back, transport: Transport::Wifi })
         );
         let event = recv_until(&rx, |ev| matches!(ev, Event::Frame(_)));
         let Event::Frame(frame) = event else { unreachable!() };
@@ -513,7 +521,7 @@ mod tests {
         let event = recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
         assert_eq!(
             event,
-            Event::Status(Status::EnVivo { width: 1280, height: 720, camera: Camera::Back })
+            Event::Status(Status::EnVivo { width: 1280, height: 720, camera: Camera::Back, transport: Transport::Wifi })
         );
     }
 
