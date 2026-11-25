@@ -340,6 +340,7 @@ impl CamdeskApp {
     }
 
     fn ensure_pipeline(&mut self) -> Option<String> {
+        point_at_ffmpeg();
         let mut warning = None;
         if self.decoder.is_none() {
             match decode::Decoder::new() {
@@ -502,6 +503,7 @@ impl CamdeskApp {
     }
 
     fn start_recording(&mut self) {
+        point_at_ffmpeg();
         if self.monitors.is_empty() {
             self.monitors = monitors();
         }
@@ -625,6 +627,39 @@ fn note(warning: &mut Option<String>, text: String) {
         }
         None => *warning = Some(text),
     }
+}
+
+fn point_at_ffmpeg() {
+    if let Some(dir) = std::env::var_os("CAMDESK_FFMPEG_DIR") {
+        if std::path::PathBuf::from(&dir).join("avcodec-62.dll").is_file() {
+            return;
+        }
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(mut dir) = exe.parent().map(|path| path.to_path_buf()) else { return };
+    if dir.join("avcodec-62.dll").is_file() {
+        return;
+    }
+    for _ in 0..5 {
+        if let Some(found) = ffmpeg_bin(&dir.join("third_party")) {
+            std::env::set_var("CAMDESK_FFMPEG_DIR", found);
+            return;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+}
+
+fn ffmpeg_bin(third_party: &std::path::Path) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(third_party).ok()?;
+    for entry in entries.flatten() {
+        let bin = entry.path().join("bin");
+        if bin.join("avcodec-62.dll").is_file() {
+            return Some(bin);
+        }
+    }
+    None
 }
 
 fn point_at_vcam_dll() {

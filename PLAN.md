@@ -337,3 +337,17 @@ Español. Controles de la primera versión:
 12. Mover los sliders de color: el cambio se ve en la preview y en Zoom. Restablecer deja la imagen como sin efectos. Al reabrir la app, los ajustes siguen.
 
 Los crates `protocol`, `vcam-shm` y `link`, y la corrección de color de `fx`, se prueban sin teléfono y sin Zoom, con fixtures de bytes.
+
+Resultados parciales en esta PC (25/11/2026). Zoom no está instalado y Meet no se abrió.
+
+1. USB: `adb` ve el teléfono `e5c31a82` en `device`. Conectar en modo automático pasa a **Ocupado**: otro cliente ya tiene el stream. Wi-Fi no se probó.
+2. No hubo preview: el teléfono no entregó frames.
+3. Zoom no está instalado. Meet no se abrió. La cámara virtual sí arranca al conectar (`cámara iniciada` en el log) y se va al cerrar la ventana.
+4 y 5. Sin Zoom y sin imagen, no se vieron el giro ni el negro inicial.
+6. `cargo test -p record -- --ignored graba_un_segundo` dejó un MP4 con `ftyp` de poco más de un segundo y audio AAC. El encoder que abre es `h264_nvenc`. No se grabaron 15 segundos con micrófono ni con Zoom.
+7. No se hizo la grabación de 30 minutos.
+8. No se cortó el Wi-Fi.
+9. El handle de la ventana apareció en cerca de 1,1 s. Antes de Conectar no estaban cargadas `avcodec`, `swscale` ni el runtime de NVIDIA. Después de Conectar sí se cargan `avcodec-62.dll`, `avutil-60.dll` y `swscale-9.dll`.
+10. Hay una RTX 4060 y el runtime de NVIDIA Video Effects. La casilla se puede marcar y se apaga sola con el texto "el runtime está instalado, pero este build todavía no corre GreenScreen".
+11. En esta PC la casilla no queda deshabilitada, porque la GPU y el runtime están.
+12. Sin imagen no se vieron los sliders en la preview ni en Zoom.

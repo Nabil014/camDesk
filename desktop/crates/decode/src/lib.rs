@@ -247,19 +247,9 @@ impl Decoder {
         for row in 0..uv_rows {
             uv[row * stride..row * stride + CANVAS_W as usize].fill(128);
         }
-        if decoded.width == 0 || decoded.height == 0 {
+        let Some((x0, y0, dst_w, dst_h)) = fit_canvas(decoded.width, decoded.height) else {
             return;
-        }
-        let scale_w = CANVAS_W / decoded.width;
-        let scale_h = CANVAS_H / decoded.height;
-        let scale = scale_w.min(scale_h).max(1);
-        let dst_w = (decoded.width * scale) & !1;
-        let dst_h = (decoded.height * scale) & !1;
-        if dst_w == 0 || dst_h == 0 {
-            return;
-        }
-        let x0 = ((CANVAS_W - dst_w) / 2) & !1;
-        let y0 = ((CANVAS_H - dst_h) / 2) & !1;
+        };
         let src_w = decoded.width as usize;
         let src_h = decoded.height as usize;
         for dy in 0..dst_h as usize {
@@ -469,6 +459,22 @@ fn copy_px(src: &[u8], src_w: usize, x: usize, y: usize, dst: &mut [u8], dst_w: 
     dst[to..to + 4].copy_from_slice(&src[from..from + 4]);
 }
 
+/// Devuelve (x, y, ancho, alto) pares para que la imagen entre completa en 1920x1080.
+fn fit_canvas(src_w: u32, src_h: u32) -> Option<(u32, u32, u32, u32)> {
+    if src_w == 0 || src_h == 0 {
+        return None;
+    }
+    let scale = (CANVAS_W as f32 / src_w as f32).min(CANVAS_H as f32 / src_h as f32);
+    let dst_w = ((src_w as f32 * scale).round() as u32).min(CANVAS_W) & !1;
+    let dst_h = ((src_h as f32 * scale).round() as u32).min(CANVAS_H) & !1;
+    if dst_w < 2 || dst_h < 2 {
+        return None;
+    }
+    let x0 = ((CANVAS_W - dst_w) / 2) & !1;
+    let y0 = ((CANVAS_H - dst_h) / 2) & !1;
+    Some((x0, y0, dst_w, dst_h))
+}
+
 fn annexb_has_idr(bytes: &[u8]) -> bool {
     annexb_has_nal(bytes, 5)
 }
@@ -547,6 +553,17 @@ fn video_frame(payload: Vec<u8>, rotation: Rotation, keyframe: bool) -> Frame {
         },
         payload,
     }
+}
+
+#[test]
+fn el_720p_llena_el_lienzo_y_el_vertical_deja_barras() {
+    assert_eq!(fit_canvas(1280, 720), Some((0, 0, 1920, 1080)));
+    assert_eq!(fit_canvas(1920, 1080), Some((0, 0, 1920, 1080)));
+    let (x, y, w, h) = fit_canvas(720, 1280).expect("vertical");
+    assert_eq!((y, h), (0, 1080));
+    assert!((576..=640).contains(&w), "ancho vertical {w}");
+    assert!(x > 0 && x + w <= CANVAS_W);
+    assert_eq!(fit_canvas(0, 720), None);
 }
 
 #[test]
