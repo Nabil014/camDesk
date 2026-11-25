@@ -547,6 +547,9 @@ impl CamdeskApp {
 
     fn caption(&self) -> String {
         let Some(texture) = &self.preview else {
+            if self.recording.is_some() {
+                return "cellCam permanece en negro".into();
+            }
             return "Zoom recibe cellCam a 1920×1080".into();
         };
         if !self.status.starts_with("En vivo") && self.status != "Desconectado" {
@@ -567,6 +570,9 @@ impl CamdeskApp {
     }
 
     fn empty_copy(&self) -> String {
+        if self.recording.is_some() && self.preview.is_none() {
+            return "Grabando sin cámara. La vista previa sigue vacía.".into();
+        }
         match self.status.as_str() {
             "Conectando" => "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.".into(),
             "Ocupado" | "Teléfono no autorizado" | "Versión incompatible" => "Sin imagen.".into(),
