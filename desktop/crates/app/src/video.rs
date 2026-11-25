@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use fx::{BackgroundBlur, ColorCorrector, ColorParams};
 use link::{Event, Session, SessionConfig, Status};
+use protocol::Rotation;
 
 /// Pedir un keyframe más seguido no lo trae antes: el teléfono codifica un IDR por pedido.
 const KEYFRAME_GAP: Duration = Duration::from_millis(500);
@@ -25,6 +26,7 @@ pub enum Command {
     Pipeline { decoder: Option<decode::Decoder>, writer: Option<vcam_shm::Writer> },
     Start(SessionConfig),
     Stop,
+    Rotation(Option<Rotation>),
     Color(ColorParams),
     Blur { on: bool, strength: f32 },
     Quit,
@@ -95,6 +97,7 @@ struct Worker {
     decoder: Option<decode::Decoder>,
     writer: Option<vcam_shm::Writer>,
     color: ColorCorrector,
+    rotation: Option<Rotation>,
     blur: Option<BackgroundBlur>,
     blur_notice: Option<String>,
     last_keyframe_request: Option<Instant>,
@@ -114,6 +117,7 @@ impl Worker {
             decoder: None,
             writer: None,
             color: ColorCorrector::new(),
+            rotation: None,
             blur: None,
             blur_notice: None,
             last_keyframe_request: None,
@@ -179,6 +183,7 @@ impl Worker {
                 }
             }
             Command::Stop => self.close_session(),
+            Command::Rotation(rotation) => self.rotation = rotation,
             Command::Color(params) => self.color.set(params),
             Command::Blur { on: false, .. } => {
                 self.blur = None;
@@ -255,8 +260,11 @@ impl Worker {
         }
     }
 
-    fn decode(&mut self, frame: protocol::Frame) -> Option<decode::Decoded> {
+    fn decode(&mut self, mut frame: protocol::Frame) -> Option<decode::Decoded> {
         let decoder = self.decoder.as_mut()?;
+        if let Some(rotation) = self.rotation {
+            frame.header.rotation = rotation;
+        }
         match decoder.push(&frame) {
             Ok(image) => image,
             Err(decode::DecodeError::NeedKeyframe) => {

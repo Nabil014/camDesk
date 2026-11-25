@@ -21,6 +21,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, MF_E_INVALID_STATE_TRANSITION, MF_E_MEDIA_SOURCE_WRONGSTATE, MF_E_SHUTDOWN,
     MF_E_UNSUPPORTED_SERVICE, MF_E_UNSUPPORTED_TIME_FORMAT, MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_DEFAULT_STRIDE,
     MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
+    MF_MT_YUV_MATRIX, MF_MT_VIDEO_NOMINAL_RANGE, MFVideoTransferMatrix_BT709, MFNominalRange_16_235,
     MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_STREAM_STATE, MF_STREAM_STATE_RUNNING, MF_STREAM_STATE_STOPPED, MENewStream,
     MESourceStarted, MESourceStopped, MEStreamStarted, MEStreamStopped, MEUpdatedStream, MFMediaType_Video,
     MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, MF_ATTRIBUTE_TYPE, MF_ATTRIBUTES_MATCH_TYPE,
@@ -128,11 +129,32 @@ fn mark_state(inner: &SourceInner, next: SourceState) {
     *inner.state.lock().unwrap_or_else(|poison| poison.into_inner()) = next;
 }
 
+fn sample_timing(origin: i64, index: i64) -> (i64, i64) {
+    let offset = index * 10_000_000 / 30;
+    let next_offset = (index + 1) * 10_000_000 / 30;
+    (origin + offset, next_offset - offset)
+}
+
+#[test]
+fn duracion_de_muestra_independiente_del_origen() {
+    let origin = 10_000_000_000;
+    let mut end = origin;
+    for index in 0..30 {
+        let (time, duration) = sample_timing(origin, index);
+        assert_eq!(time, end);
+        assert!((333_333..=333_334).contains(&duration));
+        end = time + duration;
+    }
+    assert_eq!(end, origin + 10_000_000);
+}
+
 fn nv12_type() -> windows::core::Result<IMFMediaType> {
     let media_type = unsafe { MFCreateMediaType() }?;
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)?;
+        media_type.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        media_type.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
         media_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(WIDTH, HEIGHT))?;
         media_type.SetUINT64(&MF_MT_FRAME_RATE, pack_size(30, 1))?;
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack_size(1, 1))?;
@@ -565,7 +587,8 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaStream_Impl for Stream_Impl
             return Err(fail(MF_E_MEDIA_SOURCE_WRONGSTATE));
         }
         let index_due = self.source.samples.load(Ordering::Acquire) as i64;
-        let due = self.source.origin.load(Ordering::Acquire) + index_due * 10_000_000 / 30;
+        let origin = self.source.origin.load(Ordering::Acquire);
+        let (due, _) = sample_timing(origin, index_due);
         let now = unsafe { MFGetSystemTime() };
         if due > now {
             let nanos = ((due - now) as u64).saturating_mul(100);
@@ -596,8 +619,7 @@ impl windows::Win32::Media::MediaFoundation::IMFMediaStream_Impl for Stream_Impl
         copy_nv12(&buffer, &frame)?;
         unsafe { sample.AddBuffer(&buffer)? };
         let index = self.source.samples.fetch_add(1, Ordering::AcqRel) as i64;
-        let time = self.source.origin.load(Ordering::Acquire) + index * 10_000_000 / 30;
-        let duration = (index + 1) * 10_000_000 / 30 - time;
+        let (time, duration) = sample_timing(self.source.origin.load(Ordering::Acquire), index);
         unsafe {
             sample.SetSampleTime(time)?;
             sample.SetSampleDuration(duration)?;

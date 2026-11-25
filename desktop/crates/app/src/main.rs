@@ -17,6 +17,7 @@ use std::time::Duration;
 use eframe::egui;
 use fx::{BlurAvailability, ColorParams, blur_availability};
 use link::{Camera, Mode, Resolution, SessionConfig, Status, Transport};
+use protocol::Rotation;
 use theme::Tone;
 use video::{Command, Report, Video};
 use widgets::{Action, Icon};
@@ -39,11 +40,20 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+const ROTATIONS: [(&str, &str, Option<Rotation>); 5] = [
+    ("auto", "Automática", None),
+    ("0", "0°", Some(Rotation::R0)),
+    ("90", "90°", Some(Rotation::R90)),
+    ("180", "180°", Some(Rotation::R180)),
+    ("270", "270°", Some(Rotation::R270)),
+];
+
 struct CamdeskApp {
     mode: LinkMode,
     ip: String,
     resolution: Resolution,
     camera: Camera,
+    rotation: Option<Rotation>,
     color: ColorParams,
     blur_on: bool,
     blur_strength: f32,
@@ -89,6 +99,7 @@ impl CamdeskApp {
             ip: String::new(),
             resolution: Resolution::P720,
             camera: Camera::Back,
+            rotation: None,
             color: ColorParams::default(),
             blur_on: false,
             blur_strength: 0.5,
@@ -188,6 +199,25 @@ impl CamdeskApp {
             widgets::field_label(&mut cols[1], "Cámara");
             self.dirty |= widgets::segmented(&mut cols[1], &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
         });
+        let previous = self.rotation;
+        let (_, selected, _) = ROTATIONS.iter().find(|entry| entry.2 == previous).unwrap();
+        let name = widgets::field_label(ui, "Rotación");
+        egui::ComboBox::from_id_salt("rotacion")
+            .width(ui.available_width())
+            .selected_text(*selected)
+            .show_ui(ui, |ui| {
+                for (_, label, rotation) in ROTATIONS {
+                    ui.selectable_value(&mut self.rotation, rotation, label);
+                }
+            })
+            .response
+            .labelled_by(name.id);
+        if self.rotation != previous {
+            self.dirty = true;
+            if let Some(video) = &self.video {
+                video.send(Command::Rotation(self.rotation));
+            }
+        }
     }
 
     fn retrying(&self) -> bool {
@@ -482,6 +512,7 @@ impl CamdeskApp {
         }
         let warning = self.ensure_pipeline();
         let Some(video) = &self.video else { return };
+        video.send(Command::Rotation(self.rotation));
         video.send(Command::Start(SessionConfig {
             mode,
             resolution: self.resolution,
@@ -896,6 +927,9 @@ impl CamdeskApp {
                     self.resolution = if value.trim() == "1080" { Resolution::P1080 } else { Resolution::P720 }
                 }
                 "camera" => self.camera = if value.trim() == "front" { Camera::Front } else { Camera::Back },
+                "rotation" => {
+                    self.rotation = ROTATIONS.iter().find(|entry| entry.0 == value.trim()).and_then(|entry| entry.2);
+                }
                 "brightness" => self.color.brightness = value.trim().parse().unwrap_or(0.0),
                 "contrast" => self.color.contrast = value.trim().parse().unwrap_or(0.0),
                 "saturation" => self.color.saturation = value.trim().parse().unwrap_or(0.0),
@@ -924,7 +958,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -934,6 +968,7 @@ impl CamdeskApp {
                 Camera::Back => "back",
                 Camera::Front => "front",
             },
+            ROTATIONS.iter().find(|entry| entry.2 == self.rotation).unwrap().0,
             self.color.brightness,
             self.color.contrast,
             self.color.saturation,

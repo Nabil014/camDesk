@@ -10,8 +10,12 @@ pub const CANVAS_W: u32 = 1920;
 pub const CANVAS_H: u32 = 1080;
 
 const AV_CODEC_ID_H264: i32 = 27;
+const AV_PIX_FMT_NV12: i32 = 23;
 const AV_PIX_FMT_BGRA: i32 = 28;
-const SWS_BILINEAR: i32 = 2;
+const SWS_CS_ITU709: i32 = 1;
+const SWS_BICUBIC: i32 = 4;
+const SWS_FULL_CHR_H_INP: i32 = 1 << 14;
+const SWS_PLANE_PADDING: usize = 64;
 const AVERROR_EAGAIN: i32 = -11;
 const AVERROR_EOF: i32 = -541_478_725;
 
@@ -53,7 +57,14 @@ type FnFlush = unsafe extern "C" fn(*mut std::ffi::c_void);
 type FnFrameAlloc = unsafe extern "C" fn() -> *mut std::ffi::c_void;
 type FnFrameFree = unsafe extern "C" fn(*mut *mut std::ffi::c_void);
 type FnFrameUnref = unsafe extern "C" fn(*mut std::ffi::c_void);
-type FnSwsGet = unsafe extern "C" fn(i32, i32, i32, i32, i32, i32, i32, *mut std::ffi::c_void, *mut std::ffi::c_void, *const f64) -> *mut std::ffi::c_void;
+type FnSwsAlloc = unsafe extern "C" fn() -> *mut std::ffi::c_void;
+type FnSwsScaleFrame = unsafe extern "C" fn(*mut std::ffi::c_void, *mut std::ffi::c_void, *const std::ffi::c_void) -> i32;
+type FnSwsCoefficients = unsafe extern "C" fn(i32) -> *const i32;
+type FnSwsSetColorspace = unsafe extern "C" fn(*mut std::ffi::c_void, *const i32, i32, *const i32, i32, i32, i32, i32) -> i32;
+type FnSwsGetCached = unsafe extern "C" fn(
+    *mut std::ffi::c_void, i32, i32, i32, i32, i32, i32, i32,
+    *mut std::ffi::c_void, *mut std::ffi::c_void, *const f64,
+) -> *mut std::ffi::c_void;
 type FnSwsScale = unsafe extern "C" fn(*mut std::ffi::c_void, *const *const u8, *const i32, i32, i32, *mut *mut u8, *const i32) -> i32;
 type FnSwsFree = unsafe extern "C" fn(*mut std::ffi::c_void);
 
@@ -75,7 +86,11 @@ struct Ffmpeg {
     frame_alloc: FnFrameAlloc,
     frame_free: FnFrameFree,
     frame_unref: FnFrameUnref,
-    sws_get: FnSwsGet,
+    sws_alloc: FnSwsAlloc,
+    sws_scale_frame: FnSwsScaleFrame,
+    sws_coefficients: FnSwsCoefficients,
+    sws_colorspace: FnSwsSetColorspace,
+    sws_cached: FnSwsGetCached,
     sws_scale: FnSwsScale,
     sws_free: FnSwsFree,
 }
@@ -128,7 +143,11 @@ fn load_ffmpeg() -> Result<Ffmpeg, DecodeError> {
         frame_alloc: sym(&avutil, b"av_frame_alloc")?,
         frame_free: sym(&avutil, b"av_frame_free")?,
         frame_unref: sym(&avutil, b"av_frame_unref")?,
-        sws_get: sym(&swscale, b"sws_getContext")?,
+        sws_alloc: sym(&swscale, b"sws_alloc_context")?,
+        sws_scale_frame: sym(&swscale, b"sws_scale_frame")?,
+        sws_coefficients: sym(&swscale, b"sws_getCoefficients")?,
+        sws_colorspace: sym(&swscale, b"sws_setColorspaceDetails")?,
+        sws_cached: sym(&swscale, b"sws_getCachedContext")?,
         sws_scale: sym(&swscale, b"sws_scale")?,
         sws_free: sym(&swscale, b"sws_freeContext")?,
         _avutil: avutil,
@@ -143,9 +162,10 @@ pub struct Decoder {
     ctx: *mut std::ffi::c_void,
     frame: *mut std::ffi::c_void,
     sws: *mut std::ffi::c_void,
-    sws_w: i32,
-    sws_h: i32,
-    sws_fmt: i32,
+    bgra_frame: *mut std::ffi::c_void,
+    canvas_sws: *mut std::ffi::c_void,
+    canvas_input: Vec<u8>,
+    canvas_output: Vec<u8>,
     seen_idr: bool,
     codec_config: Vec<u8>,
 }
@@ -180,9 +200,10 @@ impl Decoder {
             ctx,
             frame,
             sws: std::ptr::null_mut(),
-            sws_w: 0,
-            sws_h: 0,
-            sws_fmt: -1,
+            bgra_frame: std::ptr::null_mut(),
+            canvas_sws: std::ptr::null_mut(),
+            canvas_input: Vec::new(),
+            canvas_output: Vec::new(),
             seen_idr: false,
             codec_config: Vec::new(),
         })
@@ -238,7 +259,7 @@ impl Decoder {
     pub fn to_canvas_nv12(&mut self, decoded: &Decoded, y: &mut [u8], uv: &mut [u8], stride: usize) {
         let rows = CANVAS_H as usize;
         let uv_rows = rows / 2;
-        if stride < CANVAS_W as usize || y.len() < stride * rows || uv.len() < stride * uv_rows {
+        if stride < CANVAS_W as usize || stride > y.len() / rows || stride > uv.len() / uv_rows {
             return;
         }
         for row in 0..rows {
@@ -250,34 +271,82 @@ impl Decoder {
         let Some((x0, y0, dst_w, dst_h)) = fit_canvas(decoded.width, decoded.height) else {
             return;
         };
-        let src_w = decoded.width as usize;
-        let src_h = decoded.height as usize;
-        for dy in 0..dst_h as usize {
-            let sy = dy * src_h / dst_h as usize;
-            let y_row = (y0 as usize + dy) * stride + x0 as usize;
-            let uv_row = if dy % 2 == 0 {
-                Some(((y0 as usize + dy) / 2) * stride + x0 as usize)
-            } else {
-                None
-            };
-            for dx in 0..dst_w as usize {
-                let sx = dx * src_w / dst_w as usize;
-                let pix = (sy * src_w + sx) * 4;
-                if pix + 3 >= decoded.bgra.len() {
-                    continue;
-                }
-                let b = decoded.bgra[pix] as i32;
-                let g = decoded.bgra[pix + 1] as i32;
-                let r = decoded.bgra[pix + 2] as i32;
-                y[y_row + dx] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(16, 235) as u8;
-                if let Some(uv_at) = uv_row {
-                    if dx % 2 == 0 {
-                        let u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(16, 240) as u8;
-                        let v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(16, 240) as u8;
-                        uv[uv_at + dx] = u;
-                        uv[uv_at + dx + 1] = v;
-                    }
-                }
+        let Some(src_stride) = i32::try_from(decoded.width).ok().and_then(|width| width.checked_mul(4)) else {
+            return;
+        };
+        let Ok(src_height) = i32::try_from(decoded.height) else { return };
+        let Some(src_len) = (src_stride as usize).checked_mul(src_height as usize) else { return };
+        let Some(pixels) = decoded.bgra.get(..src_len) else { return };
+        let Some(padded_len) = src_len.checked_add(SWS_PLANE_PADDING) else { return };
+
+        self.canvas_sws = unsafe {
+            (self.ff.sws_cached)(
+                self.canvas_sws,
+                src_stride / 4,
+                src_height,
+                AV_PIX_FMT_BGRA,
+                dst_w as i32,
+                dst_h as i32,
+                AV_PIX_FMT_NV12,
+                SWS_BICUBIC | SWS_FULL_CHR_H_INP,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            )
+        };
+        if self.canvas_sws.is_null() {
+            return;
+        }
+
+        let color_status = unsafe {
+            let bt709 = (self.ff.sws_coefficients)(SWS_CS_ITU709);
+            // BGRA de rango completo a NV12 BT.709 limitado. Contraste y saturación 1.0 en 16.16.
+            (self.ff.sws_colorspace)(self.canvas_sws, bt709, 1, bt709, 0, 0, 1 << 16, 1 << 16)
+        };
+        if color_status < 0 {
+            return;
+        }
+
+        // Mantener padding para libswscale y copiar solo el rectángulo visible al lienzo.
+        self.canvas_input.resize(padded_len, 0);
+        self.canvas_input[..src_len].copy_from_slice(pixels);
+        self.canvas_input[src_len..].fill(0);
+        let dst_w = dst_w as usize;
+        let dst_h = dst_h as usize;
+        let output_stride = dst_w.next_multiple_of(64);
+        let output_y_len = output_stride * dst_h;
+        let uv_offset = output_y_len + SWS_PLANE_PADDING;
+        self.canvas_output.resize(uv_offset + output_y_len / 2 + SWS_PLANE_PADDING, 0);
+        let mut output = [
+            self.canvas_output.as_mut_ptr(),
+            self.canvas_output[uv_offset..].as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        ];
+        let input = [self.canvas_input.as_ptr(), std::ptr::null(), std::ptr::null(), std::ptr::null()];
+        let output_stride_i32 = output_stride as i32;
+        let scaled = unsafe {
+            (self.ff.sws_scale)(
+                self.canvas_sws,
+                input.as_ptr(),
+                [src_stride, 0, 0, 0].as_ptr(),
+                0,
+                src_height,
+                output.as_mut_ptr(),
+                [output_stride_i32, output_stride_i32, 0, 0].as_ptr(),
+            )
+        };
+        if scaled != dst_h as i32 {
+            return;
+        }
+        for (plane, top, offset, height) in [
+            (y, y0 as usize, 0, dst_h),
+            (uv, y0 as usize / 2, uv_offset, dst_h / 2),
+        ] {
+            for row in 0..height {
+                let from = offset + row * output_stride;
+                let to = (top + row) * stride + x0 as usize;
+                plane[to..to + dst_w].copy_from_slice(&self.canvas_output[from..from + dst_w]);
             }
         }
     }
@@ -329,71 +398,42 @@ impl Decoder {
         }
         let width = unsafe { read_i32(self.frame, 104) };
         let height = unsafe { read_i32(self.frame, 108) };
-        let format = unsafe { read_i32(self.frame, 116) };
         if width <= 0 || height <= 0 {
             unsafe { (self.ff.frame_unref)(self.frame) };
             return Ok(None);
         }
-        self.ensure_sws(width, height, format)?;
-        let mut bgra = vec![0u8; width as usize * height as usize * 4];
-        let mut src_planes = [std::ptr::null::<u8>(); 4];
-        let mut src_stride = [0i32; 4];
-        unsafe {
-            for i in 0..4 {
-                src_planes[i] = read_ptr(self.frame, i * 8);
-                src_stride[i] = read_i32(self.frame, 64 + i * 4);
-            }
+        if self.sws.is_null() {
+            self.sws = unsafe { (self.ff.sws_alloc)() };
         }
-        let dst_ptr = bgra.as_mut_ptr();
-        let dst_stride = [width * 4];
+        if self.bgra_frame.is_null() {
+            self.bgra_frame = unsafe { (self.ff.frame_alloc)() };
+        }
+        if self.sws.is_null() || self.bgra_frame.is_null() {
+            return Err(DecodeError::Message("no se pudo preparar la conversión a BGRA".into()));
+        }
+
+        // libswscale usa los metadatos de color del AVFrame de entrada en cada conversión.
         let scaled = unsafe {
-            (self.ff.sws_scale)(
-                self.sws,
-                src_planes.as_ptr(),
-                src_stride.as_ptr(),
-                0,
-                height,
-                &dst_ptr as *const *mut u8 as *mut *mut u8,
-                dst_stride.as_ptr(),
-            )
+            (self.ff.frame_unref)(self.bgra_frame);
+            write_i32(self.bgra_frame, 104, width);
+            write_i32(self.bgra_frame, 108, height);
+            write_i32(self.bgra_frame, 116, AV_PIX_FMT_BGRA);
+            (self.ff.sws_scale_frame)(self.sws, self.bgra_frame, self.frame)
         };
         unsafe { (self.ff.frame_unref)(self.frame) };
         if scaled < 0 {
-            return Err(DecodeError::Message(format!("sws_scale devolvió {scaled}")));
+            return Err(DecodeError::Message(format!("sws_scale_frame devolvió {scaled}")));
+        }
+
+        let plane = unsafe { read_ptr(self.bgra_frame, 0) };
+        let stride = unsafe { read_i32(self.bgra_frame, 64) } as isize;
+        let row_bytes = width as usize * 4;
+        let mut bgra = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as isize {
+            let pixels = unsafe { std::slice::from_raw_parts(plane.offset(row * stride), row_bytes) };
+            bgra.extend_from_slice(pixels);
         }
         Ok(Some((width as u32, height as u32, bgra)))
-    }
-
-    fn ensure_sws(&mut self, w: i32, h: i32, fmt: i32) -> Result<(), DecodeError> {
-        if !self.sws.is_null() && self.sws_w == w && self.sws_h == h && self.sws_fmt == fmt {
-            return Ok(());
-        }
-        if !self.sws.is_null() {
-            unsafe { (self.ff.sws_free)(self.sws) };
-            self.sws = std::ptr::null_mut();
-        }
-        let sws = unsafe {
-            (self.ff.sws_get)(
-                w,
-                h,
-                fmt,
-                w,
-                h,
-                AV_PIX_FMT_BGRA,
-                SWS_BILINEAR,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                std::ptr::null(),
-            )
-        };
-        if sws.is_null() {
-            return Err(DecodeError::Message("sws_getContext falló".into()));
-        }
-        self.sws = sws;
-        self.sws_w = w;
-        self.sws_h = h;
-        self.sws_fmt = fmt;
-        Ok(())
     }
 }
 
@@ -401,6 +441,12 @@ impl Drop for Decoder {
     fn drop(&mut self) {
         if !self.sws.is_null() {
             unsafe { (self.ff.sws_free)(self.sws) };
+        }
+        if !self.canvas_sws.is_null() {
+            unsafe { (self.ff.sws_free)(self.canvas_sws) };
+        }
+        if !self.bgra_frame.is_null() {
+            unsafe { (self.ff.frame_free)(&mut self.bgra_frame) };
         }
         if !self.frame.is_null() {
             let mut frame = self.frame;
@@ -531,6 +577,10 @@ unsafe fn read_i32(base: *mut std::ffi::c_void, offset: usize) -> i32 {
     *base.cast::<u8>().add(offset).cast::<i32>()
 }
 
+unsafe fn write_i32(base: *mut std::ffi::c_void, offset: usize, value: i32) {
+    *base.cast::<u8>().add(offset).cast::<i32>() = value;
+}
+
 unsafe fn write_i64(base: *mut std::ffi::c_void, offset: usize, value: i64) {
     *base.cast::<u8>().add(offset).cast::<i64>() = value;
 }
@@ -614,6 +664,46 @@ fn annexb_rota_y_deja_barras() {
         .unwrap()
         .expect("el IDR usa el SPS guardado");
     assert_eq!((only_idr.width, only_idr.height), (32, 16));
+
+    let mut edge_row = [0, 0, 0, 255].repeat(640);
+    edge_row.extend_from_slice(&[255, 255, 255, 255].repeat(640));
+    let contrast_edge = Decoded {
+        width: 1280,
+        height: 720,
+        bgra: edge_row.repeat(720),
+        pts_us: 0,
+    };
+    let stride = CANVAS_W as usize + 16;
+    let mut y = vec![0; stride * CANVAS_H as usize];
+    let mut uv = vec![0; stride * CANVAS_H as usize / 2];
+    decoder.to_canvas_nv12(&contrast_edge, &mut y, &mut uv, stride);
+    let center = stride * (CANVAS_H as usize / 2) + CANVAS_W as usize / 2;
+    assert!((17..235).contains(&y[center]), "el borde escalado debe tener luminancia intermedia: {}", y[center]);
+    assert_eq!(y[0], 16, "el negro mantiene el rango limitado");
+    assert_eq!(uv[0], 128);
+    assert_eq!(y[CANVAS_W as usize], 0, "el padding queda fuera del lienzo");
+}
+
+#[test]
+fn respeta_bt709_en_preview_y_lienzo() {
+    std::env::set_var("CAMDESK_FFMPEG_DIR", ffmpeg_bin());
+    let mut decoder = Decoder::new().unwrap();
+    let frame = video_frame(include_bytes!("../fixtures/red-bt709-32x16.annexb").to_vec(), Rotation::R0, true);
+    let image = decoder.push(&frame).unwrap().unwrap();
+    let center = (8 * 32 + 16) * 4;
+    let bgra = &image.bgra[center..center + 4];
+    // El mismo H.264 interpretado como BT.601 da verde 0 en vez de 23.
+    assert!(bgra[0] <= 2 && bgra[1].abs_diff(23) <= 2 && bgra[2] >= 253);
+
+    let stride = CANVAS_W as usize;
+    let mut y = vec![0; stride * CANVAS_H as usize];
+    let mut uv = vec![0; y.len() / 2];
+    decoder.to_canvas_nv12(&image, &mut y, &mut uv, stride);
+    let luma = 540 * stride + 960;
+    let chroma = 270 * stride + 960;
+    assert!(y[luma].abs_diff(77) <= 2);
+    assert!(uv[chroma].abs_diff(95) <= 2);
+    assert!(uv[chroma + 1].abs_diff(231) <= 2);
 }
 
 #[test]

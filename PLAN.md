@@ -167,9 +167,11 @@ pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder()
 
 ## Lienzo de la cámara virtual
 
+`decode` respeta la matriz y el rango del cuadro H.264 al generar BGRA. Convierte el lienzo a NV12 con matriz BT.709 y rango limitado. `vcam` declara ambos atributos en el tipo de video de Media Foundation.
+
 La cámara virtual es siempre **1920x1080 NV12 a 30 fps**. No cambia con la rotación, con el selector 720p/1080p ni con `STATUS_ADJUSTED`. Zoom y Meet pierden la cámara si cambia el formato.
 
-- `decode` escala el frame ya rotado para que entre completo en 1920x1080, centrado, con barras negras (Y=16, UV=128).
+- `decode` usa libswscale con filtrado bicúbico e interpolación de crominancia para escalar el frame ya rotado a NV12. Entra completo en 1920x1080, centrado, con barras negras (Y=16, UV=128).
 - Teléfono horizontal a 720p: se escala a 1920x1080. Teléfono vertical: unos 608x1080 al centro, con barras a los costados.
 - La preview de la UI usa el BGRA a tamaño nativo, no el lienzo, ya con los efectos aplicados.
 
@@ -244,6 +246,10 @@ Cambiar un offset rompe la cámara: se sube `version` y se actualizan `vcam-shm`
 
 ## Cámara virtual
 
+Si Windows impide reemplazar la DLL porque está en uso, Camdesk puede iniciar la cámara con la copia que ya está registrada en la ruta prevista y deja constancia en el log. Volverá a intentar la actualización al iniciar la cámara en la próxima ejecución.
+
+La duración de cada muestra es la diferencia entre dos posiciones consecutivas a 30 fps (333333 o 333334 unidades de 100 ns). El origen de la sesión solo se suma al tiempo de presentación.
+
 Windows 11 build 22000 o más nuevo (la máquina de prueba es 26200). `MFCreateVirtualCamera`:
 
 - Nombre: `cellCam`. Cómo lo muestran Zoom y Meet se anota tras el paso 0.
@@ -311,6 +317,7 @@ Español. Controles de la primera versión:
 - Modo de conexión: Automática, Solo USB, Solo Wi-Fi. Campo de IP.
 - Resolución 720p o 1080p. Cámara trasera o frontal. Botón Conectar.
 - Preview de la imagen ya rotada.
+- Selector Rotación. Automática aplica los metadatos del teléfono; 0°, 90°, 180° o 270° fijan el ángulo para la preview y la cámara virtual. Se puede cambiar en vivo y se guarda en la configuración.
 - Estado: conectando, en vivo, desconectado, ocupado (otro cliente conectado al teléfono), teléfono no autorizado (aceptar la depuración USB), versión incompatible.
 - Efectos: casilla "Desenfocar fondo" y su fuerza (deshabilitada con el motivo si no hay RTX o runtime). Sliders de brillo, contraste, saturación y temperatura, y botón Restablecer.
 - Monitor, casillas de audio del sistema y de micrófono, desplegable de micrófono.

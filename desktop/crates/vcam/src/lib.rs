@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{Interface, GUID, HRESULT, PCWSTR};
-use windows::Win32::Foundation::{E_POINTER, ERROR_ACCESS_DENIED, LocalFree, HLOCAL};
+use windows::Win32::Foundation::{E_POINTER, ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, LocalFree, HLOCAL};
 use windows::Win32::Media::MediaFoundation::{
     MFCreateVirtualCamera, MFShutdown, MFStartup, IMFVirtualCamera, MFSTARTUP_FULL, MFVirtualCameraAccess_CurrentUser,
     MFVirtualCameraLifetime_Session, MFVirtualCameraType_SoftwareCameraSource,
@@ -95,6 +95,13 @@ impl VirtualCamera {
                 Ok(_) => {}
                 Err(error) if dest.is_file() && std::fs::read(&source).ok() == std::fs::read(&dest).ok() => {
                     log_line(&format!("la DLL está en uso y ya es la misma: {error}"));
+                }
+                Err(error)
+                    if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0 as i32)
+                        && dest.is_file()
+                        && registered_path().as_deref() == dest.to_str() =>
+                {
+                    log_line("la DLL está en uso; se usa la copia registrada y queda pendiente actualizarla");
                 }
                 Err(error) => return Err(err(format!("no se pudo copiar la DLL: {error}"))),
             }
