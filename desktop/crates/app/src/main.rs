@@ -220,6 +220,12 @@ impl CamdeskApp {
         if !self.blur_note.is_empty() {
             ui.label(&self.blur_note);
         }
+        if !available {
+            ui.hyperlink_to(
+                "Descargar el runtime",
+                "https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources/",
+            );
+        }
         let mut changed = false;
         changed |= ui.add(egui::Slider::new(&mut self.color.brightness, -1.0..=1.0).text("Brillo")).changed();
         changed |= ui.add(egui::Slider::new(&mut self.color.contrast, -1.0..=1.0).text("Contraste")).changed();
