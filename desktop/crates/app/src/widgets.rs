@@ -221,17 +221,6 @@ pub fn badge(painter: &egui::Painter, anchor: egui::Pos2, align: egui::Align2, m
     painter.galley(rect.min + pad + vec2(13.0, 0.0), galley, color);
 }
 
-/// Píldora con punto y texto, para la barra de arriba.
-pub fn pill(ui: &mut Ui, color: Color32, text: &str) {
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), body(12.0), theme::TEXT_SOFT);
-    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 35.0, 26.0), Sense::hover());
-    response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, text));
-    let painter = ui.painter();
-    painter.rect_stroke(rect, 13.0, Stroke::new(1.0_f32, theme::FIELD_BORDER), StrokeKind::Inside);
-    painter.circle_filled(pos2(rect.left() + 13.5, rect.center().y), 3.5, color);
-    painter.galley(pos2(rect.left() + 25.0, rect.center().y - galley.size().y * 0.5), galley, theme::TEXT_SOFT);
-}
-
 /// La marca de Camdesk: una cámara de línea.
 pub fn logo(ui: &mut Ui) {
     let (rect, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());

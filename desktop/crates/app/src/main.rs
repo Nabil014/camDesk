@@ -991,15 +991,6 @@ impl CamdeskApp {
             ui.spacing_mut().item_spacing.x = 10.0;
             widgets::logo(ui);
             ui.label(egui::RichText::new("Camdesk").font(theme::semibold(14.0)));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // La cámara vive hasta cerrar la ventana, aunque se desconecte el teléfono.
-                let (color, text) = if self.vcam.is_some() {
-                    (theme::LIVE, "cellCam activa en Zoom y Meet")
-                } else {
-                    (theme::OFF, "cellCam en espera")
-                };
-                widgets::pill(ui, color, text);
-            });
         });
     }
 
