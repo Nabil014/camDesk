@@ -246,9 +246,10 @@ impl CamdeskApp {
             .monitors
             .iter()
             .find(|item| Some(&item.id) == self.monitor.as_ref())
-            .map(|item| item.name.clone())
+            .map(|item| monitor_text(item))
             .unwrap_or_else(|| "Elegir monitor".into());
         egui::ComboBox::from_id_salt("monitor")
+            .width(220.0)
             .selected_text(monitor_label)
             .show_ui(ui, |ui| {
                 if self.monitors.is_empty() {
@@ -259,7 +260,7 @@ impl CamdeskApp {
                 }
                 for item in &self.monitors {
                     let selected = self.monitor.as_ref() == Some(&item.id);
-                    if ui.selectable_label(selected, &item.name).clicked() {
+                    if ui.selectable_label(selected, monitor_text(item)).clicked() {
                         self.monitor = Some(item.id.clone());
                         self.dirty = true;
                     }
@@ -721,6 +722,10 @@ fn app_log(message: &str) {
         let _ = std::io::Write::write_all(&mut file, message.as_bytes());
         let _ = std::io::Write::write_all(&mut file, b"\n");
     }
+}
+
+fn monitor_text(item: &record::MonitorInfo) -> String {
+    format!("{} {}x{}", item.name, item.width, item.height)
 }
 
 fn status_text(status: Status) -> String {
