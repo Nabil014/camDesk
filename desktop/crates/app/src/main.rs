@@ -543,6 +543,28 @@ impl CamdeskApp {
         } else {
             self.preview = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         }
+        self.note_orientation(width as u32, height as u32);
+    }
+
+    fn note_orientation(&mut self, width: u32, height: u32) {
+        if !self.status.starts_with("En vivo") || self.recording.is_some() {
+            return;
+        }
+        let blur_off = matches!(self.blur, Some(BlurAvailability::NoNvidiaGpu | BlurAvailability::NoRuntime));
+        if blur_off {
+            return;
+        }
+        let replace = self.notice.is_empty()
+            || self.notice.starts_with("En vivo")
+            || self.notice.starts_with("Teléfono vertical");
+        if !replace {
+            return;
+        }
+        self.notice = if height > width {
+            "Teléfono vertical\nLa vista previa muestra el teléfono. Las barras las agrega Zoom.".into()
+        } else {
+            "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into()
+        };
     }
 
     fn write_canvas(&mut self, decoded: &decode::Decoded) {
