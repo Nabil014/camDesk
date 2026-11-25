@@ -433,8 +433,19 @@ impl CamdeskApp {
                                 Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
                                 Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
                             };
-                        } else if self.notice.starts_with("Conectando") || self.notice.starts_with("Teléfono no autorizado") {
-                            self.notice.clear();
+                        } else if self.notice.starts_with("Conectando")
+                            || self.notice.starts_with("Teléfono no autorizado")
+                            || self.notice.is_empty()
+                        {
+                            let blur_off = matches!(
+                                self.blur,
+                                Some(BlurAvailability::NoNvidiaGpu | BlurAvailability::NoRuntime)
+                            );
+                            if blur_off {
+                                self.notice.clear();
+                            } else {
+                                self.notice = "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into();
+                            }
                         }
                     } else {
                         self.live_transport = None;
@@ -1052,7 +1063,7 @@ fn notice_color(text: &str) -> egui::Color32 {
         WARN
     } else if lower.contains("sin cámara") {
         INFO
-    } else if lower.contains("guardad") || lower.contains("grabando") {
+    } else if lower.contains("guardad") || lower.contains("grabando") || lower.starts_with("en vivo") {
         LIVE
     } else if lower.contains("falta")
         || lower.contains("no es válida")
