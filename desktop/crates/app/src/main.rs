@@ -434,6 +434,11 @@ impl CamdeskApp {
                     } else {
                         self.live_transport = None;
                     }
+                    if matches!(status, Status::Incompatible) {
+                        self.notice = "Versión incompatible\ncellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk.".into();
+                        self.session = None;
+                        self.events = None;
+                    }
                     if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
                         self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
                     }

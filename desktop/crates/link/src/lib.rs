@@ -109,7 +109,13 @@ fn drive(cfg: SessionConfig, port: u16, stop: Arc<AtomicBool>, keyframe: Arc<Ato
             Attempt::Stop => break,
             Attempt::Again(status) => status,
         };
-        if tx.send(Event::Status(status)).is_err() || !sleep_interruptible(&stop, Duration::from_secs(2)) {
+        if tx.send(Event::Status(status.clone())).is_err() {
+            break;
+        }
+        if matches!(status, Status::Incompatible) {
+            break;
+        }
+        if !sleep_interruptible(&stop, Duration::from_secs(2)) {
             break;
         }
     }
@@ -552,6 +558,29 @@ mod tests {
         let (_session, rx) = session(server.port);
         recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
         recv_until(&rx, |ev| matches!(ev, Event::Status(Status::Desconectado)));
+    }
+
+    #[test]
+    fn version_incompatible_no_reintenta() {
+        let server = Server::spawn(|mut stream| {
+            let _ = read_handshake(&mut stream);
+            let bytes = HandshakeResponse {
+                status: protocol::HandshakeStatus::Version,
+                version: 1,
+                codec: 0,
+                width: 1280,
+                height: 720,
+                fps: 30,
+                camera: 0,
+                flags: 0,
+            }
+            .to_bytes();
+            stream.write_all(&bytes).unwrap();
+        });
+        let (_session, rx) = session(server.port);
+        recv_until(&rx, |ev| matches!(ev, Event::Status(Status::Incompatible)));
+        let _ = rx.recv_timeout(Duration::from_millis(200));
+        assert!(rx.recv_timeout(Duration::from_millis(2500)).is_err());
     }
 
     #[test]
