@@ -112,7 +112,7 @@ fn drive(cfg: SessionConfig, port: u16, stop: Arc<AtomicBool>, keyframe: Arc<Ato
         if tx.send(Event::Status(status.clone())).is_err() {
             break;
         }
-        if matches!(status, Status::Incompatible) {
+        if matches!(status, Status::Incompatible | Status::Ocupado) {
             break;
         }
         if !sleep_interruptible(&stop, Duration::from_secs(2)) {
@@ -629,6 +629,8 @@ mod tests {
         });
         let (_session, rx) = session(server.port);
         recv_until(&rx, |ev| matches!(ev, Event::Status(Status::Ocupado)));
+        let _ = rx.recv_timeout(Duration::from_millis(200));
+        assert!(rx.recv_timeout(Duration::from_millis(2500)).is_err());
     }
 
     #[test]

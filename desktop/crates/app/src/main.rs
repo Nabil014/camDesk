@@ -439,6 +439,11 @@ impl CamdeskApp {
                         self.session = None;
                         self.events = None;
                     }
+                    if matches!(status, Status::Ocupado) {
+                        self.notice = "Teléfono ocupado\nOtro cliente ya está conectado. Cerrar OBS y volver a conectar.".into();
+                        self.session = None;
+                        self.events = None;
+                    }
                     if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
                         self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
                     }
