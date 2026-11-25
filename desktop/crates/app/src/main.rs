@@ -149,7 +149,7 @@ impl CamdeskApp {
         self.dirty |= segments(ui, &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
         let label = if self.session.is_none() {
             "Conectar"
-        } else if self.status == "Conectando" {
+        } else if self.shown_status() == "Conectando" || self.status == "Teléfono no autorizado" {
             "Cancelar"
         } else {
             "Desconectar"
@@ -161,6 +161,19 @@ impl CamdeskApp {
                 self.disconnect();
             }
         }
+    }
+
+    fn retrying(&self) -> bool {
+        self.session.is_some()
+            && self.preview.is_none()
+            && !self.status.starts_with("En vivo")
+            && self.status != "Ocupado"
+            && self.status != "Versión incompatible"
+            && self.status != "Teléfono no autorizado"
+    }
+
+    fn shown_status(&self) -> &str {
+        if self.retrying() { "Conectando" } else { self.status.as_str() }
     }
 
     fn disconnect(&mut self) {
@@ -565,7 +578,7 @@ impl CamdeskApp {
             if self.recording.is_some() {
                 return "cellCam permanece en negro".into();
             }
-            return match self.status.as_str() {
+            return match self.shown_status() {
                 "Conectando" | "Teléfono no autorizado" => "Reintento cada 2 segundos".into(),
                 "Versión incompatible" => "No hay reintento útil".into(),
                 _ => "Zoom recibe cellCam a 1920×1080".into(),
@@ -598,8 +611,10 @@ impl CamdeskApp {
         if self.recording.is_some() && self.preview.is_none() {
             return "Grabando sin cámara. La vista previa sigue vacía.".into();
         }
+        if self.retrying() || self.status == "Conectando" {
+            return "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.".into();
+        }
         match self.status.as_str() {
-            "Conectando" => "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.".into(),
             "Ocupado" | "Teléfono no autorizado" | "Versión incompatible" => "Sin imagen.".into(),
             _ => "La imagen aparece al conectar. Hasta el primer cuadro, Zoom ve la cámara en negro.".into(),
         }
@@ -790,12 +805,13 @@ impl eframe::App for CamdeskApp {
             .show(ctx, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new("cellCam").color(MUTED));
-                    let status_tone = if self.status == "Desconectado" && self.preview.is_some() {
+                    let shown = self.shown_status();
+                    let status_tone = if shown == "Desconectado" && self.preview.is_some() {
                         WARN
                     } else {
-                        status_color(&self.status)
+                        status_color(shown)
                     };
-                    ui.label(egui::RichText::new(&self.status).color(status_tone));
+                    ui.label(egui::RichText::new(shown).color(status_tone));
                     if let Some(recording) = &self.recording {
                         let elapsed = format_elapsed(recording.elapsed());
                         let encoder = encoder_label(recording.encoder());
