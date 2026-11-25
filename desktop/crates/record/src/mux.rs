@@ -83,6 +83,24 @@ struct Ff {
     dict_free: unsafe extern "C" fn(*mut *mut c_void),
 }
 
+fn rational(ptr: *mut c_void, offset: usize) -> (i32, i32) {
+    unsafe { (read_i32(ptr, offset), read_i32(ptr, offset + 4)) }
+}
+
+fn scale_ts(value: i64, src: (i32, i32), dst: (i32, i32)) -> i64 {
+    if value == NOPTS || src.1 == 0 || dst.0 == 0 {
+        return value;
+    }
+    let num = value as i128 * src.0 as i128 * dst.1 as i128;
+    let den = src.1 as i128 * dst.0 as i128;
+    if den == 0 {
+        return value;
+    }
+    let half = den / 2;
+    let adjusted = if num >= 0 { num + half } else { num - half };
+    (adjusted / den) as i64
+}
+
 fn sym<T: Copy>(lib: &Library, name: &[u8]) -> Result<T, String> {
     unsafe {
         lib.get(name)
@@ -167,6 +185,10 @@ pub struct Mux {
     audio_frame: i32,
     video_pts: i64,
     audio_pts: i64,
+    video_src: (i32, i32),
+    audio_src: (i32, i32),
+    video_dst: (i32, i32),
+    audio_dst: (i32, i32),
 }
 
 unsafe impl Send for Mux {}
@@ -228,6 +250,8 @@ impl Mux {
             return Err(format!("no se pudo crear el archivo ({rc})"));
         }
         unsafe { write_ptr(fmt, OFF_FMT_PB, pb) };
+        let video_src = rational(video, OFF_TIME_BASE);
+        let audio_src = rational(audio, OFF_TIME_BASE);
         let mut dict = ptr::null_mut();
         let key = CString::new("movflags").unwrap();
         let val = CString::new("frag_keyframe+empty_moov+default_base_moof").unwrap();
@@ -243,6 +267,10 @@ impl Mux {
                 return Err(format!("no se pudo escribir la cabecera ({rc})"));
             }
         }
+        // El MP4 reemplaza la base 1/30 por una más fina. Los pts del encoder
+        // siguen en la base del codec y hay que pasarlos a la de la pista.
+        let video_dst = rational(vstream, OFF_STREAM_TIME_BASE);
+        let audio_dst = rational(astream, OFF_STREAM_TIME_BASE);
         let vframe = unsafe { (ff.frame_alloc)() };
         let aframe = unsafe { (ff.frame_alloc)() };
         let packet = unsafe { (ff.packet_alloc)() };
@@ -297,6 +325,10 @@ impl Mux {
             audio_frame,
             video_pts: 0,
             audio_pts: 0,
+            video_src,
+            audio_src,
+            video_dst,
+            audio_dst,
         })
     }
 
@@ -404,6 +436,15 @@ impl Mux {
                 }
                 if read_i64(self.packet, OFF_PKT_DURATION) == 0 {
                     write_i64(self.packet, OFF_PKT_DURATION, duration);
+                }
+                let (src, dst) = if stream == 0 {
+                    (self.video_src, self.video_dst)
+                } else {
+                    (self.audio_src, self.audio_dst)
+                };
+                for offset in [OFF_PKT_PTS, OFF_PKT_DTS, OFF_PKT_DURATION] {
+                    let value = read_i64(self.packet, offset);
+                    write_i64(self.packet, offset, scale_ts(value, src, dst));
                 }
                 let wr = (self.ff.write_frame)(self.fmt, self.packet);
                 (self.ff.packet_unref)(self.packet);

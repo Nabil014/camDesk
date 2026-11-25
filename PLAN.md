@@ -344,10 +344,10 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado y Meet no 
 2. No hubo preview: el teléfono no entregó frames.
 3. Zoom no está instalado. Meet no se abrió. La cámara virtual sí arranca al conectar (`cámara iniciada` en el log) y se va al cerrar la ventana.
 4 y 5. Sin Zoom y sin imagen, no se vieron el giro ni el negro inicial.
-6. `cargo test -p record -- --ignored graba_un_segundo` dejó un MP4 con `ftyp` de poco más de un segundo y audio AAC. El encoder que abre es `h264_nvenc`. No se grabaron 15 segundos con micrófono ni con Zoom.
+6. Primera toma de 15,5 s (`Videos\Camdesk\grabacion-20261125-005430.mp4`): audio 15,5 s y video aplastado a 51 ms, porque el MP4 cambia la base de 1/30 a 1/15360 y los timestamps no se convertían. Corregido. Segunda toma (`grabacion-20261125-005941.mp4`): video 14,67 s a 30 fps, audio 14,76 s, encoder `h264_nvenc`, monitor 1360x768. `graba_un_segundo` mide video 1,000 s a 30 fps y audio 1,081 s. No se repitió con Zoom ni con un video sonando a propósito.
 7. No se hizo la grabación de 30 minutos.
 8. No se cortó el Wi-Fi.
 9. El handle de la ventana apareció en cerca de 1,1 s. Antes de Conectar no estaban cargadas `avcodec`, `swscale` ni el runtime de NVIDIA. Después de Conectar sí se cargan `avcodec-62.dll`, `avutil-60.dll` y `swscale-9.dll`.
 10. Hay una RTX 4060 y el runtime de NVIDIA Video Effects. La casilla se puede marcar y se apaga sola con el texto "el runtime está instalado, pero este build todavía no corre GreenScreen".
 11. En esta PC la casilla no queda deshabilitada, porque la GPU y el runtime están.
-12. Sin imagen no se vieron los sliders en la preview ni en Zoom.
+12. Sin imagen no se vieron los sliders en la preview ni en Zoom. El brillo 0,35 quedó en `%LOCALAPPDATA%\Camdesk\config.toml` y al reabrir la ventana el control vuelve en 0,35.

@@ -595,7 +595,28 @@ fn graba_un_segundo() {
     let bytes = std::fs::read(&output).expect("el MP4 tiene que existir");
     assert!(bytes.len() > 1024, "mp4 corto: {}", bytes.len());
     assert!(bytes.windows(4).any(|chunk| chunk == b"ftyp"), "sin ftyp");
-    eprintln!("smoke encoder={encoder} bytes={}", bytes.len());
+    let probe = std::process::Command::new(bin.join("ffprobe.exe"))
+        .args(["-v", "error", "-show_entries", "stream=codec_type,duration,avg_frame_rate", "-of", "csv=p=0", output.to_str().unwrap()])
+        .output()
+        .expect("ffprobe");
+    let text = String::from_utf8_lossy(&probe.stdout);
+    eprintln!("smoke encoder={encoder} bytes={} {}", bytes.len(), text.trim());
+    let mut video_s = 0.0f64;
+    let mut audio_s = 0.0f64;
+    for line in text.lines() {
+        let parts: Vec<_> = line.split(',').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let duration: f64 = parts[2].parse().unwrap_or(0.0);
+        if parts[0] == "video" {
+            video_s = duration;
+        } else if parts[0] == "audio" {
+            audio_s = duration;
+        }
+    }
+    assert!(audio_s > 0.8 && video_s > 0.8, "duración video={video_s} audio={audio_s}");
+    assert!((video_s - audio_s).abs() < 0.5, "el video no acompaña al audio: {video_s} vs {audio_s}");
     let _ = std::fs::remove_file(&output);
 }
 
