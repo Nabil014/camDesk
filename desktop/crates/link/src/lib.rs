@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use protocol::{Frame, FrameParser, HandshakeRequest, HandshakeResponse, ProtocolError};
+use protocol::{Frame, FrameKind, FrameParser, HandshakeRequest, HandshakeResponse, ProtocolError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -193,7 +193,7 @@ fn usb_target(port: u16) -> Usb {
     let Some(bin) = find_adb() else {
         return Usb::Status(Status::Desconectado);
     };
-    let output = match Command::new(&bin).arg("devices").output() {
+    let output = match adb(&bin).arg("devices").output() {
         Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
         Err(_) => return Usb::Status(Status::Desconectado),
     };
@@ -201,7 +201,7 @@ fn usb_target(port: u16) -> Usb {
         DevicePick::Unauthorized => Usb::Status(Status::NoAutorizado),
         DevicePick::None => Usb::Status(Status::Desconectado),
         DevicePick::Ready(serial) => {
-            let listed = Command::new(&bin)
+            let listed = adb(&bin)
                 .args(["-s", &serial, "forward", &format!("tcp:{port}"), &format!("tcp:{port}")])
                 .output();
             if listed.map(|out| out.status.success()).unwrap_or(false) {
@@ -221,7 +221,20 @@ fn clear_forward(forward: &Option<Forward>) {
         return;
     };
     let args = remove_forward_args(&forward.serial);
-    let _ = Command::new(&forward.bin).args(&args).output();
+    let _ = adb(&forward.bin).args(&args).output();
+}
+
+/// adb es un programa de consola. Sin esta bandera, una app sin consola abre una ventana negra en cada reintento.
+fn adb(bin: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(bin);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
 }
 
 pub(crate) fn remove_forward_args(serial: &str) -> Vec<String> {
@@ -354,14 +367,23 @@ fn talk(
                 }
                 Err(ProtocolError::BadMagic) => skip_until_key = true,
                 Ok(frame) => {
-                    if skip_until_key && !frame.header.keyframe {
+                    // El SPS/PPS pasa siempre: el keyframe que se espera lo necesita.
+                    let config = frame.header.kind == FrameKind::CodecConfig;
+                    if skip_until_key && !frame.header.keyframe && !config {
                         continue;
                     }
-                    skip_until_key = false;
+                    if !config {
+                        skip_until_key = false;
+                    }
                     match tx.try_send(Event::Frame(frame)) {
                         Ok(()) => {}
                         Err(mpsc::TrySendError::Disconnected(_)) => return Attempt::Stop,
-                        Err(mpsc::TrySendError::Full(_)) => {}
+                        // Quien lee se atrasó. Un frame P perdido deja basura hasta el próximo IDR:
+                        // se descarta hasta un keyframe y se pide uno, igual que tras un desync.
+                        Err(mpsc::TrySendError::Full(_)) => {
+                            skip_until_key = true;
+                            keyframe.store(true, Ordering::Release);
+                        }
                     }
                 }
             }
@@ -631,6 +653,51 @@ mod tests {
         recv_until(&rx, |ev| matches!(ev, Event::Status(Status::Ocupado)));
         let _ = rx.recv_timeout(Duration::from_millis(200));
         assert!(rx.recv_timeout(Duration::from_millis(2500)).is_err());
+    }
+
+    #[test]
+    fn canal_lleno_descarta_hasta_un_keyframe_y_lo_pide() {
+        let (got_tx, got_rx) = mpsc::channel();
+        let server = Server::spawn(move |mut stream| {
+            let _ = read_handshake(&mut stream);
+            stream.write_all(&handshake_ok(1280, 720)).unwrap();
+            // Más frames de los que entran en el canal de 64, y nadie los lee.
+            for n in 0..100u8 {
+                stream.write_all(&video_frame_flags(&[n], n == 0)).unwrap();
+            }
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut request = [0u8; 28];
+            let read = stream.read_exact(&mut request).map(|_| request.to_vec());
+            got_tx.send(read.ok()).unwrap();
+            // Llega el keyframe pedido y después un P.
+            stream.write_all(&video_frame_flags(&[200], true)).unwrap();
+            stream.write_all(&video_frame_flags(&[201], false)).unwrap();
+            thread::sleep(Duration::from_millis(500));
+        });
+        let (_session, rx) = session(server.port);
+        let request = got_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(request, Some(protocol::request_keyframe()), "no pidió un keyframe");
+        let mut payloads = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(Event::Frame(frame)) => payloads.push(frame.payload[0]),
+                Ok(_) => {}
+                Err(_) if payloads.contains(&201) => break,
+                Err(_) => {}
+            }
+        }
+        let gap = payloads.iter().position(|p| *p == 200).expect("no llegó el keyframe pedido");
+        assert_eq!(payloads[gap + 1], 201);
+        // Antes del keyframe solo hay frames contiguos desde el 0: los P de después del corte no pasaron.
+        assert!(payloads[..gap].iter().enumerate().all(|(i, p)| *p as usize == i), "pasó un P sin su keyframe: {payloads:?}");
+        assert!(gap < 100, "no se descartó nada: {gap}");
+    }
+
+    fn video_frame_flags(payload: &[u8], keyframe: bool) -> Vec<u8> {
+        let mut bytes = video_frame(payload);
+        bytes[5] = if keyframe { protocol::FRAME_FLAG_KEYFRAME } else { 0 };
+        bytes
     }
 
     #[test]

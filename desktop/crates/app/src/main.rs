@@ -1,15 +1,21 @@
 //! Ventana de Camdesk. Al abrir no carga FFmpeg, no carga el runtime de NVIDIA,
 //! no registra la cámara virtual, no crea el archivo mapeado, no corre adb,
 //! no abre WASAPI y no captura la pantalla.
+//!
+//! El video no corre en este hilo: lo lleva `video::Video`.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod video;
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use eframe::egui;
-use fx::{BackgroundBlur, BlurAvailability, ColorCorrector, ColorParams, blur_availability};
-use link::{Camera, Event, Mode, Resolution, Session, SessionConfig, Status, Transport};
+use fx::{BlurAvailability, ColorParams, blur_availability};
+use link::{Camera, Mode, Resolution, SessionConfig, Status, Transport};
+use video::{Command, Report, Video};
 use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
 
 fn main() -> eframe::Result<()> {
@@ -40,7 +46,8 @@ struct CamdeskApp {
     blur_strength: f32,
     blur: Option<BlurAvailability>,
     blur_note: String,
-    _blur_fx: Option<BackgroundBlur>,
+    /// Aviso de modo rendimiento mientras el desenfoque siga prendido.
+    blur_perf: Option<String>,
     system_audio: bool,
     mic_on: bool,
     monitors: Vec<record::MonitorInfo>,
@@ -51,16 +58,14 @@ struct CamdeskApp {
     status: String,
     live_transport: Option<Transport>,
     notice: String,
-    session: Option<Session>,
-    events: Option<Receiver<Event>>,
-    decoder: Option<decode::Decoder>,
-    writer: Option<vcam_shm::Writer>,
+    /// Hay una sesión con el teléfono abierta en el hilo de video.
+    connected: bool,
+    /// El hilo de video ya tiene un decoder y un escritor del archivo mapeado.
+    has_decoder: bool,
+    has_writer: bool,
+    video: Option<Video>,
     vcam: Option<vcam::VirtualCamera>,
-    color_fx: ColorCorrector,
     preview: Option<egui::TextureHandle>,
-    rgba: Vec<u8>,
-    canvas_y: Vec<u8>,
-    canvas_uv: Vec<u8>,
     recording: Option<Recording>,
     dirty: bool,
 }
@@ -85,7 +90,7 @@ impl CamdeskApp {
             blur_strength: 0.5,
             blur: None,
             blur_note: String::new(),
-            _blur_fx: None,
+            blur_perf: None,
             system_audio: true,
             mic_on: true,
             monitors: Vec::new(),
@@ -96,16 +101,12 @@ impl CamdeskApp {
             status: "Desconectado".into(),
             live_transport: None,
             notice: String::new(),
-            session: None,
-            events: None,
-            decoder: None,
-            writer: None,
+            connected: false,
+            has_decoder: false,
+            has_writer: false,
+            video: None,
             vcam: None,
-            color_fx: ColorCorrector::new(),
             preview: None,
-            rgba: Vec::new(),
-            canvas_y: Vec::new(),
-            canvas_uv: Vec::new(),
             recording: None,
             dirty: false,
         };
@@ -147,7 +148,7 @@ impl CamdeskApp {
         self.dirty |= ip.changed();
         self.dirty |= segments(ui, &mut self.resolution, &[("720p", Resolution::P720), ("1080p", Resolution::P1080)]);
         self.dirty |= segments(ui, &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
-        let label = if self.session.is_none() {
+        let label = if !self.connected {
             "Conectar"
         } else if self.shown_status() == "Conectando" || self.status == "Teléfono no autorizado" {
             "Cancelar"
@@ -155,8 +156,8 @@ impl CamdeskApp {
             "Desconectar"
         };
         if action_button(ui, label, Action::Primary).clicked() {
-            if self.session.is_none() {
-                self.connect();
+            if !self.connected {
+                self.connect(ui.ctx());
             } else {
                 self.disconnect();
             }
@@ -164,7 +165,7 @@ impl CamdeskApp {
     }
 
     fn retrying(&self) -> bool {
-        self.session.is_some()
+        self.connected
             && self.preview.is_none()
             && !self.status.starts_with("En vivo")
             && self.status != "Ocupado"
@@ -177,11 +178,11 @@ impl CamdeskApp {
     }
 
     fn disconnect(&mut self) {
-        self.session = None;
-        self.events = None;
-        if let Some(decoder) = self.decoder.as_mut() {
-            decoder.reset();
+        // El hilo de video suelta la sesión: adb y el join no traban la ventana.
+        if let Some(video) = &self.video {
+            video.send(Command::Stop);
         }
+        self.connected = false;
         self.status = "Desconectado".into();
         if self.preview.is_some() && self.recording.is_none() {
             self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
@@ -204,24 +205,16 @@ impl CamdeskApp {
         ui.add_enabled_ui(available, |ui| {
             if toggle(ui, &mut self.blur_on, "Desenfocar fondo").changed() {
                 self.dirty = true;
-                if self.blur_on {
-                    match BackgroundBlur::new() {
-                        Ok(mut fx) => {
-                            fx.set_strength(self.blur_strength);
-                            self._blur_fx = Some(fx);
-                            self.blur_note.clear();
-                            if self.notice.starts_with("Sin desenfoque") {
-                                self.notice.clear();
-                            }
-                        }
-                        Err(error) => {
-                            self.blur_on = false;
-                            self._blur_fx = None;
-                            self.blur_note = error.message;
-                        }
-                    }
-                } else {
-                    self._blur_fx = None;
+                // El runtime de NVIDIA se carga en el hilo de video, que es el que usa el efecto.
+                // Si no carga, llega BlurFailed y la casilla vuelve a apagarse.
+                let ctx = ui.ctx().clone();
+                let command = Command::Blur { on: self.blur_on, strength: self.blur_strength };
+                match self.ensure_video(&ctx) {
+                    Some(video) => video.send(command),
+                    None => self.blur_on = false,
+                }
+                if !self.blur_on {
+                    self.blur_perf = None;
                     if self.notice.starts_with("Modo rendimiento") {
                         self.notice.clear();
                     }
@@ -232,8 +225,8 @@ impl CamdeskApp {
                 if labeled_slider(ui, "Fuerza", &mut percent, 0.0..=100.0, true) {
                     self.blur_strength = percent / 100.0;
                     self.dirty = true;
-                    if let Some(fx) = self._blur_fx.as_mut() {
-                        fx.set_strength(self.blur_strength);
+                    if let Some(video) = &self.video {
+                        video.send(Command::Blur { on: true, strength: self.blur_strength });
                     }
                 }
             }
@@ -261,6 +254,7 @@ impl CamdeskApp {
             changed |= labeled_slider(ui, "Temperatura", &mut self.color.temperature, -1.0..=1.0, false);
             if changed {
                 self.dirty = true;
+                self.send_color();
             }
             if ui
                 .add(
@@ -272,6 +266,7 @@ impl CamdeskApp {
             {
                 self.color = ColorParams::default();
                 self.dirty = true;
+                self.send_color();
             }
         }
     }
@@ -345,7 +340,31 @@ impl CamdeskApp {
         }
     }
 
-    fn connect(&mut self) {
+    /// Crea el hilo de video la primera vez que hace falta: al conectar o al prender el desenfoque.
+    fn ensure_video(&mut self, ctx: &egui::Context) -> Option<&Video> {
+        if self.video.is_none() {
+            match Video::spawn(ctx.clone()) {
+                Ok(video) => {
+                    video.send(Command::Color(self.color));
+                    self.video = Some(video);
+                }
+                Err(error) => {
+                    self.notice = format!("No se pudo crear el hilo de video\n{error}");
+                    app_log(&self.notice);
+                    return None;
+                }
+            }
+        }
+        self.video.as_ref()
+    }
+
+    fn send_color(&self) {
+        if let Some(video) = &self.video {
+            video.send(Command::Color(self.color));
+        }
+    }
+
+    fn connect(&mut self, ctx: &egui::Context) {
         let wifi = parse_ip(&self.ip);
         let mode = match self.mode {
             LinkMode::Auto => Mode::Auto,
@@ -362,43 +381,53 @@ impl CamdeskApp {
             self.notice = "La IP no es válida".into();
             return;
         }
+        if self.ensure_video(ctx).is_none() {
+            return;
+        }
         let warning = self.ensure_pipeline();
-        match Session::start(SessionConfig {
+        let Some(video) = &self.video else { return };
+        video.send(Command::Start(SessionConfig {
             mode,
             resolution: self.resolution,
             camera: self.camera,
             wifi,
-        }) {
-            Ok((session, events)) => {
-                self.session = Some(session);
-                self.events = Some(events);
-                self.status = "Conectando".into();
-                self.notice = warning.unwrap_or_else(|| {
-                    "Conectando\nUSB si el teléfono está autorizado. Si no, la IP.".into()
-                });
-            }
-            Err(error) => self.notice = error.to_string(),
-        }
+        }));
+        self.connected = true;
+        self.status = "Conectando".into();
+        self.notice = warning.unwrap_or_else(|| {
+            "Conectando\nUSB si el teléfono está autorizado. Si no, la IP.".into()
+        });
     }
 
+    /// Decoder y archivo mapeado se crean al primer Conectar y pasan al hilo de video, que los guarda
+    /// hasta cerrar la ventana. El archivo no se recrea en la ejecución.
     fn ensure_pipeline(&mut self) -> Option<String> {
         point_at_ffmpeg();
         let mut warning = None;
-        if self.decoder.is_none() {
+        let mut decoder = None;
+        if !self.has_decoder {
             match decode::Decoder::new() {
-                Ok(decoder) => self.decoder = Some(decoder),
+                Ok(created) => decoder = Some(created),
                 Err(error) => note(&mut warning, error.to_string()),
             }
         }
-        if self.writer.is_none() {
+        let mut writer = None;
+        if !self.has_writer {
             let path = vcam_shm::default_path();
             match vcam_shm::Writer::create(&path) {
-                Ok(writer) => self.writer = Some(writer),
+                Ok(created) => writer = Some(created),
                 Err(error) if error.raw_os_error() == Some(1224) => match vcam_shm::Writer::open_existing(&path) {
-                    Ok(writer) => self.writer = Some(writer),
+                    Ok(created) => writer = Some(created),
                     Err(error) => note(&mut warning, format!("archivo de la cámara: {error}")),
                 },
                 Err(error) => note(&mut warning, format!("archivo de la cámara: {error}")),
+            }
+        }
+        if decoder.is_some() || writer.is_some() {
+            self.has_decoder |= decoder.is_some();
+            self.has_writer |= writer.is_some();
+            if let Some(video) = &self.video {
+                video.send(Command::Pipeline { decoder, writer });
             }
         }
         point_at_vcam_dll();
@@ -416,155 +445,140 @@ impl CamdeskApp {
 
     fn poll(&mut self, ctx: &egui::Context) {
         let mut batch = Vec::new();
-        if let Some(events) = self.events.as_ref() {
-            while let Ok(event) = events.try_recv() {
-                batch.push(event);
+        if let Some(video) = self.video.as_ref() {
+            while let Some(report) = video.try_report() {
+                batch.push(report);
             }
         }
-        let mut latest = None;
-        for event in batch {
-            match event {
-                Event::Status(status) => {
-                    if matches!(status, Status::Conectando) {
-                        if let Some(decoder) = self.decoder.as_mut() {
-                            decoder.reset();
-                        }
-                    }
-                    if let Status::EnVivo { camera, transport, .. } = status {
-                        self.live_transport = Some(transport);
-                        if camera != self.camera {
-                            self.camera = camera;
-                            self.dirty = true;
-                            self.notice = match camera {
-                                Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
-                                Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
-                            };
-                        } else if self.notice.starts_with("Conectando")
-                            || self.notice.starts_with("Teléfono no autorizado")
-                            || self.notice.is_empty()
-                        {
-                            let blur_off = matches!(
-                                self.blur,
-                                Some(BlurAvailability::NoNvidiaGpu | BlurAvailability::NoRuntime)
-                            );
-                            if blur_off {
-                                self.notice.clear();
-                            } else {
-                                self.notice = "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into();
-                            }
-                        }
-                    } else {
-                        self.live_transport = None;
-                    }
-                    if matches!(status, Status::Incompatible) {
-                        self.notice = "Versión incompatible\ncellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk.".into();
-                        self.session = None;
-                        self.events = None;
-                    }
-                    if matches!(status, Status::Ocupado) {
-                        self.notice = "Teléfono ocupado\nOtro cliente ya está conectado. Cerrar OBS y volver a conectar.".into();
-                        self.session = None;
-                        self.events = None;
-                    }
-                    if matches!(status, Status::NoAutorizado) {
-                        self.notice = "Teléfono no autorizado\nAceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos.".into();
-                    }
-                    if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
-                        self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
-                    }
-                    let hold_unauthorized = matches!(status, Status::Conectando)
-                        && self.notice.starts_with("Teléfono no autorizado")
-                        && self.preview.is_none();
-                    if !hold_unauthorized {
-                        self.status = status_text(status);
+        for report in batch {
+            match report {
+                Report::Status(status) => self.on_status(status),
+                Report::StartFailed(text) => {
+                    self.connected = false;
+                    self.status = "Desconectado".into();
+                    self.notice = text;
+                }
+                Report::BlurReady => {
+                    self.blur_note.clear();
+                    if self.notice.starts_with("Sin desenfoque") {
+                        self.notice.clear();
                     }
                 }
-                Event::Frame(frame) => {
-                    if let Some(image) = self.push_frame(frame) {
-                        latest = Some(image);
+                Report::BlurFailed(text) => {
+                    self.blur_on = false;
+                    self.blur_perf = None;
+                    self.blur_note = text;
+                }
+                Report::BlurStopped(text) => {
+                    self.blur_on = false;
+                    self.blur_perf = None;
+                    self.blur_note = text;
+                    self.notice = "Sin desenfoque\nEl efecto falló y se apagó. La cámara sigue.".into();
+                }
+                Report::BlurNotice(text) => {
+                    if self.blur_on {
+                        self.blur_note = text.clone();
+                        self.blur_perf = Some(text);
                     }
+                }
+                Report::DecodeError(text) => {
+                    app_log(&text);
+                    self.notice = text;
                 }
             }
         }
-        if let Some(image) = latest {
-            self.publish(ctx, image);
+        let image = self.video.as_ref().and_then(Video::take_preview);
+        if let Some(image) = image {
+            self.upload_preview(ctx, image);
         }
     }
 
-    fn push_frame(&mut self, frame: protocol::Frame) -> Option<decode::Decoded> {
-        let decoder = self.decoder.as_mut()?;
-        match decoder.push(&frame) {
-            Ok(image) => image,
-            Err(decode::DecodeError::NeedKeyframe) => {
-                if let Some(session) = &self.session {
-                    session.request_keyframe();
+    fn on_status(&mut self, status: Status) {
+        if let Status::EnVivo { camera, transport, .. } = status {
+            self.live_transport = Some(transport);
+            if camera != self.camera {
+                self.camera = camera;
+                self.dirty = true;
+                self.notice = match camera {
+                    Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
+                    Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
+                };
+            } else if self.notice.starts_with("Conectando")
+                || self.notice.starts_with("Teléfono no autorizado")
+                || self.notice.is_empty()
+            {
+                if self.blur_unavailable() {
+                    self.notice.clear();
+                } else {
+                    self.notice = "En vivo
+La vista previa y cellCam reciben la imagen. La grabación no.".into();
                 }
-                None
             }
-            Err(decode::DecodeError::Message(text)) => {
-                self.notice = text.clone();
-                app_log(&text);
-                None
-            }
+        } else {
+            self.live_transport = None;
+        }
+        // Con Incompatible y Ocupado link no reintenta y el hilo de video ya soltó la sesión.
+        if matches!(status, Status::Incompatible) {
+            self.notice = "Versión incompatible
+cellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk.".into();
+            self.connected = false;
+        }
+        if matches!(status, Status::Ocupado) {
+            self.notice = "Teléfono ocupado
+Otro cliente ya está conectado. Cerrar OBS y volver a conectar.".into();
+            self.connected = false;
+        }
+        if matches!(status, Status::NoAutorizado) {
+            self.notice = "Teléfono no autorizado
+Aceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos.".into();
+        }
+        if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
+            self.notice = "Último cuadro
+Si se corta la red, la cámara virtual no pasa a negro.".into();
+        }
+        let hold_unauthorized = matches!(status, Status::Conectando)
+            && self.notice.starts_with("Teléfono no autorizado")
+            && self.preview.is_none();
+        if !hold_unauthorized {
+            self.status = status_text(status);
         }
     }
 
-    fn publish(&mut self, ctx: &egui::Context, mut decoded: decode::Decoded) {
-        let width = decoded.width as usize;
-        let height = decoded.height as usize;
-        let stride = width.saturating_mul(4);
-        if self.blur_on {
-            let failed = self
-                ._blur_fx
-                .as_mut()
-                .and_then(|fx| fx.apply(&mut decoded.bgra, width, height, stride).err());
-            if let Some(error) = failed {
-                self.blur_on = false;
-                self._blur_fx = None;
-                self.blur_note = error.message.clone();
-                self.notice = "Sin desenfoque\nEl efecto falló y se apagó. La cámara sigue.".into();
-            } else if let Some(note) = self._blur_fx.as_ref().and_then(|fx| fx.notice()) {
-                self.blur_note = note.to_string();
-                let replace = self.notice.is_empty()
-                    || self.notice.starts_with("En vivo")
-                    || self.notice.starts_with("Teléfono vertical")
-                    || self.notice.starts_with("Modo rendimiento");
-                if replace {
-                    self.notice = "Modo rendimiento\nEl desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
-                }
-            }
-        }
-        self.color_fx.set(self.color);
-        self.color_fx.apply(&mut decoded.bgra, width, height, stride);
-        self.upload_preview(ctx, &decoded);
-        self.write_canvas(&decoded);
+    fn blur_unavailable(&self) -> bool {
+        matches!(self.blur, Some(BlurAvailability::NoNvidiaGpu | BlurAvailability::NoRuntime))
     }
 
-    fn upload_preview(&mut self, ctx: &egui::Context, decoded: &decode::Decoded) {
-        let width = decoded.width as usize;
-        let height = decoded.height as usize;
-        self.rgba.resize(width.saturating_mul(height).saturating_mul(4), 0);
-        for (dst, src) in self.rgba.chunks_exact_mut(4).zip(decoded.bgra.chunks_exact(4)) {
-            dst[0] = src[2];
-            dst[1] = src[1];
-            dst[2] = src[0];
-            dst[3] = 255;
-        }
-        let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &self.rgba);
+    /// El cuadro ya viene rotado y con efectos del hilo de video, y ya está en la cámara virtual.
+    fn upload_preview(&mut self, ctx: &egui::Context, image: egui::ColorImage) {
+        let [width, height] = image.size;
         if let Some(texture) = self.preview.as_mut() {
             texture.set(image, egui::TextureOptions::LINEAR);
         } else {
             self.preview = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
         }
+        self.note_performance();
         self.note_orientation(width as u32, height as u32);
+    }
+
+    fn note_performance(&mut self) {
+        if !self.blur_on || self.blur_perf.is_none() {
+            return;
+        }
+        let replace = self.notice.is_empty()
+            || self.notice.starts_with("En vivo")
+            || self.notice.starts_with("Teléfono vertical")
+            || self.notice.starts_with("Modo rendimiento");
+        if replace {
+            self.notice = "Modo rendimiento
+El desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
+        }
     }
 
     fn note_orientation(&mut self, width: u32, height: u32) {
         if !self.status.starts_with("En vivo") || self.recording.is_some() {
             return;
         }
-        let blur_off = matches!(self.blur, Some(BlurAvailability::NoNvidiaGpu | BlurAvailability::NoRuntime));
-        if blur_off {
+        if self.blur_unavailable() {
             return;
         }
         let replace = self.notice.is_empty()
@@ -574,30 +588,12 @@ impl CamdeskApp {
             return;
         }
         self.notice = if height > width {
-            "Teléfono vertical\nLa vista previa muestra el teléfono. Las barras las agrega Zoom.".into()
+            "Teléfono vertical
+La vista previa muestra el teléfono. Las barras las agrega Zoom.".into()
         } else {
-            "En vivo\nLa vista previa y cellCam reciben la imagen. La grabación no.".into()
+            "En vivo
+La vista previa y cellCam reciben la imagen. La grabación no.".into()
         };
-    }
-
-    fn write_canvas(&mut self, decoded: &decode::Decoded) {
-        self.canvas_y.resize(vcam_shm::Y_BYTES, 16);
-        self.canvas_uv.resize(vcam_shm::UV_BYTES, 128);
-        if let Some(decoder) = self.decoder.as_mut() {
-            decoder.to_canvas_nv12(decoded, &mut self.canvas_y, &mut self.canvas_uv, vcam_shm::STRIDE as usize);
-        }
-        let y = std::mem::take(&mut self.canvas_y);
-        let uv = std::mem::take(&mut self.canvas_uv);
-        if let Some(writer) = self.writer.as_mut() {
-            let _ = writer.write(decoded.pts_us.saturating_mul(10), |dst_y, dst_uv| {
-                if dst_y.len() == y.len() && dst_uv.len() == uv.len() {
-                    dst_y.copy_from_slice(&y);
-                    dst_uv.copy_from_slice(&uv);
-                }
-            });
-        }
-        self.canvas_y = y;
-        self.canvas_uv = uv;
     }
 
     fn preview_pane(&self, ui: &mut egui::Ui) {
@@ -899,8 +895,9 @@ impl eframe::App for CamdeskApp {
             self.write_config();
             self.dirty = false;
         }
-        if self.session.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(16));
+        // Los cuadros piden su propio repintado desde el hilo de video. Esto mueve el pie y el epígrafe.
+        if self.connected {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else if self.recording.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -1020,6 +1017,9 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
         *on = !*on;
         response.mark_changed();
     }
+    // Está pintado a mano: sin esto, un lector de pantalla no sabe qué casilla es ni si está prendida.
+    let (enabled, selected) = (ui.is_enabled(), *on);
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, selected, label));
     let painter = ui.painter();
     painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
     let switch = egui::Rect::from_center_size(egui::pos2(rect.right() - 17.0, rect.center().y), egui::vec2(34.0, 20.0));
@@ -1033,6 +1033,8 @@ fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
 
 fn disclosure(ui: &mut egui::Ui, label: &str, flag: Option<&str>) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
+    let enabled = ui.is_enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     let painter = ui.painter();
     painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
     if let Some(flag) = flag {

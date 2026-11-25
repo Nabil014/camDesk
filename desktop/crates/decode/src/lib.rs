@@ -615,3 +615,23 @@ fn annexb_rota_y_deja_barras() {
         .expect("el IDR usa el SPS guardado");
     assert_eq!((only_idr.width, only_idr.height), (32, 16));
 }
+
+#[test]
+fn la_rotacion_es_horaria_y_no_espeja() {
+    // 3x2, cada píxel con su propio azul:  A B C
+    //                                      D E F
+    let ids = [1u8, 2, 3, 4, 5, 6];
+    let src: Vec<u8> = ids.iter().flat_map(|id| [*id, 0, 0, 255]).collect();
+    let ids_of = |bgra: &[u8]| bgra.chunks_exact(4).map(|px| px[0]).collect::<Vec<u8>>();
+
+    let (out, w, h) = rotate_bgra(&src, 3, 2, Rotation::R0);
+    assert_eq!((w, h, ids_of(&out)), (3, 2, vec![1, 2, 3, 4, 5, 6]));
+    // 90° horario: la columna izquierda (A, D) pasa a ser la fila de arriba, leída de abajo hacia arriba.
+    let (out, w, h) = rotate_bgra(&src, 3, 2, Rotation::R90);
+    assert_eq!((w, h, ids_of(&out)), (2, 3, vec![4, 1, 5, 2, 6, 3]));
+    let (out, w, h) = rotate_bgra(&src, 3, 2, Rotation::R180);
+    assert_eq!((w, h, ids_of(&out)), (3, 2, vec![6, 5, 4, 3, 2, 1]));
+    // 270° horario = 90° antihorario: la columna derecha (C, F) pasa a ser la fila de arriba.
+    let (out, w, h) = rotate_bgra(&src, 3, 2, Rotation::R270);
+    assert_eq!((w, h, ids_of(&out)), (2, 3, vec![3, 6, 2, 5, 1, 4]));
+}
