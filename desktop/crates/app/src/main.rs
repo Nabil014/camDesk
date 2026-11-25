@@ -185,6 +185,8 @@ impl CamdeskApp {
         self.status = "Desconectado".into();
         if self.preview.is_some() && self.recording.is_none() {
             self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
+        } else if self.notice.starts_with("Teléfono no autorizado") || self.notice.starts_with("Conectando") {
+            self.notice.clear();
         }
     }
 
@@ -428,7 +430,7 @@ impl CamdeskApp {
                                 Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
                                 Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
                             };
-                        } else if self.notice.starts_with("Conectando") {
+                        } else if self.notice.starts_with("Conectando") || self.notice.starts_with("Teléfono no autorizado") {
                             self.notice.clear();
                         }
                     } else {
@@ -444,10 +446,18 @@ impl CamdeskApp {
                         self.session = None;
                         self.events = None;
                     }
+                    if matches!(status, Status::NoAutorizado) {
+                        self.notice = "Teléfono no autorizado\nAceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos.".into();
+                    }
                     if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
                         self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
                     }
-                    self.status = status_text(status);
+                    let hold_unauthorized = matches!(status, Status::Conectando)
+                        && self.notice.starts_with("Teléfono no autorizado")
+                        && self.preview.is_none();
+                    if !hold_unauthorized {
+                        self.status = status_text(status);
+                    }
                 }
                 Event::Frame(frame) => {
                     if let Some(image) = self.push_frame(frame) {
