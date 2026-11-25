@@ -210,6 +210,9 @@ impl CamdeskApp {
                             fx.set_strength(self.blur_strength);
                             self._blur_fx = Some(fx);
                             self.blur_note.clear();
+                            if self.notice.starts_with("Sin desenfoque") {
+                                self.notice.clear();
+                            }
                         }
                         Err(error) => {
                             self.blur_on = false;
@@ -519,7 +522,7 @@ impl CamdeskApp {
                 self.blur_on = false;
                 self._blur_fx = None;
                 self.blur_note = error.message.clone();
-                self.notice = error.message;
+                self.notice = "Sin desenfoque\nEl efecto falló y se apagó. La cámara sigue.".into();
             } else if let Some(note) = self._blur_fx.as_ref().and_then(|fx| fx.notice()) {
                 self.blur_note = note.to_string();
                 let replace = self.notice.is_empty()
