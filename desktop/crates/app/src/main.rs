@@ -648,7 +648,7 @@ impl CamdeskApp {
     fn stop_recording(&mut self) {
         if let Some(recording) = self.recording.take() {
             match recording.stop() {
-                Ok(path) => self.notice = format!("Guardado en {}", path.display()),
+                Ok(path) => self.notice = format!("Grabación guardada\n{}", path.display()),
                 Err(error) => self.notice = error.message,
             }
         }
@@ -734,7 +734,13 @@ impl eframe::App for CamdeskApp {
                 .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(18, 8)))
                 .show_separator_line(false)
                 .show(ctx, |ui| {
-                    ui.label(egui::RichText::new(&self.notice).color(notice_color(&self.notice)));
+                    let (lead, body) = self.notice.split_once('\n').unwrap_or((self.notice.as_str(), ""));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(lead).strong().color(notice_color(lead)));
+                        if !body.is_empty() {
+                            ui.label(egui::RichText::new(body).color(MUTED));
+                        }
+                    });
                 });
         }
         egui::TopBottomPanel::bottom("estado")
