@@ -741,8 +741,11 @@ impl eframe::App for CamdeskApp {
                     ui.label(egui::RichText::new(&self.status).color(status_color(&self.status)));
                     if let Some(recording) = &self.recording {
                         let elapsed = format_elapsed(recording.elapsed());
+                        let encoder = encoder_label(recording.encoder());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(egui::RichText::new(format!("REC  {elapsed}")).color(REC).strong());
+                            ui.add_space(14.0);
+                            ui.label(egui::RichText::new(encoder).color(MUTED));
                         });
                     }
                 });
@@ -1072,6 +1075,17 @@ fn parse_ip(text: &str) -> Option<Ipv4Addr> {
     } else {
         text.parse().ok()
     }
+}
+
+fn encoder_label(name: &str) -> String {
+    let short = match name {
+        "h264_nvenc" => "NVENC",
+        "h264_amf" => "AMF",
+        "h264_qsv" => "Quick Sync",
+        "h264_mf" => "Media Foundation",
+        other => other,
+    };
+    format!("{short} · 30 fps")
 }
 
 fn format_elapsed(elapsed: Duration) -> String {
