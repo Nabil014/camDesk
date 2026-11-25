@@ -1,0 +1,10 @@
+<!-- Icono de Camdesk. Fuente de icon.png e icon.ico. A 16 y 24 px la lente va lisa (sin aro). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect x="32" y="32" width="960" height="960" rx="216" fill="#262A33"/>
+  <rect x="44" y="44" width="936" height="936" rx="206" fill="#15171C"/>
+  <rect x="312" y="176" width="400" height="672" rx="92" fill="#4C8DFF"/>
+  <circle cx="512" cy="392" r="112" fill="#0B0C0F"/>
+  <circle cx="512" cy="392" r="50" fill="none" stroke="#7FB0FF" stroke-width="24"/>
+  <circle cx="512" cy="392" r="20" fill="#7FB0FF"/>
+  <circle cx="512" cy="712" r="40" fill="#3FCF8E"/>
+</svg>
