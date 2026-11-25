@@ -223,6 +223,55 @@ pub struct ScreenPreview {
 
 type PreviewSlot = Arc<Mutex<Option<ScreenPreview>>>;
 
+/// Muestra un monitor sin grabarlo: no abre audio ni encoder ni escribe nada.
+/// Soltarlo cierra la captura; no espera, así que se puede soltar desde la UI.
+pub struct ScreenWatch {
+    monitor: MonitorId,
+    preview: PreviewSlot,
+    stop: Arc<AtomicBool>,
+    failure: Arc<Mutex<Option<String>>>,
+}
+
+impl ScreenWatch {
+    pub fn start(monitor: MonitorId) -> Result<Self, RecordError> {
+        if !monitors().iter().any(|item| item.id == monitor) {
+            return Err(err("no está ese monitor"));
+        }
+        let preview = PreviewSlot::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let failure = Arc::new(Mutex::new(None));
+        let (id, slot, stop_thread, failed) = (monitor.0.clone(), preview.clone(), stop.clone(), failure.clone());
+        std::thread::Builder::new()
+            .name("camdesk-watch".into())
+            .spawn(move || {
+                if let Err(error) = watch(&id, &stop_thread, &slot) {
+                    *failed.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error);
+                }
+            })
+            .map_err(|error| err(error.to_string()))?;
+        Ok(Self { monitor, preview, stop, failure })
+    }
+
+    pub fn monitor(&self) -> &MonitorId {
+        &self.monitor
+    }
+
+    /// El último cuadro desde la llamada anterior. Con la pantalla quieta no hay uno nuevo.
+    pub fn take_preview(&self) -> Option<ScreenPreview> {
+        self.preview.lock().unwrap_or_else(|poison| poison.into_inner()).take()
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|slot| slot.clone())
+    }
+}
+
+impl Drop for ScreenWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+    }
+}
+
 pub struct Recording {
     preview: PreviewSlot,
     stop: Arc<AtomicBool>,
@@ -398,25 +447,10 @@ fn run(
     shared: Shared,
 ) -> Result<(), String> {
     let Shared { levels, preview } = shared;
-    let index: usize = monitor_id.parse().map_err(|_| "el monitor no tiene índice".to_string())?;
-    // `from_index` toma la posición en la enumeración, que no tiene por qué ser el número de pantalla.
-    let monitor = Monitor::enumerate()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|monitor| monitor.index().ok() == Some(index))
-        .ok_or_else(|| "no está ese monitor".to_string())?;
     let latest = Arc::new(Mutex::new(None));
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::WithCursor,
-        DrawBorderSettings::WithoutBorder,
-        SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Custom(Duration::from_millis(16)),
-        DirtyRegionSettings::Default,
-        ColorFormat::Bgra8,
-        latest.clone(),
-    );
-    let capture = Screen::start_free_threaded(settings).map_err(|error| error.to_string())?;
+    let monitor = find_monitor(monitor_id)?;
+    let capture = Screen::start_free_threaded(capture_settings(monitor, Duration::from_millis(16), latest.clone()))
+        .map_err(|error| error.to_string())?;
     let audio = Arc::new(Mutex::new(SharedAudio {
         loopback: VecDeque::new(),
         mic: VecDeque::new(),
@@ -482,6 +516,53 @@ fn run(
     let _ = capture.stop();
     let _ = audio_thread.join();
     mux.finish()
+}
+
+fn find_monitor(monitor_id: &str) -> Result<Monitor, String> {
+    let index: usize = monitor_id.parse().map_err(|_| "el monitor no tiene índice".to_string())?;
+    // `from_index` toma la posición en la enumeración, que no tiene por qué ser el número de pantalla.
+    Monitor::enumerate()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|monitor| monitor.index().ok() == Some(index))
+        .ok_or_else(|| "no está ese monitor".to_string())
+}
+
+fn capture_settings(
+    monitor: Monitor,
+    interval: Duration,
+    latest: Arc<Mutex<Option<Captured>>>,
+) -> Settings<Arc<Mutex<Option<Captured>>>, Monitor> {
+    Settings::new(
+        monitor,
+        CursorCaptureSettings::WithCursor,
+        DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default,
+        MinimumUpdateIntervalSettings::Custom(interval),
+        DirtyRegionSettings::Default,
+        ColorFormat::Bgra8,
+        latest,
+    )
+}
+
+/// La captura de `ScreenWatch`: unos 10 cuadros por segundo, reducidos.
+fn watch(monitor_id: &str, stop: &AtomicBool, preview: &PreviewSlot) -> Result<(), String> {
+    let interval = Duration::from_millis(100);
+    let latest = Arc::new(Mutex::new(None));
+    let settings = capture_settings(find_monitor(monitor_id)?, interval, latest.clone());
+    let capture = Screen::start_free_threaded(settings).map_err(|error| error.to_string())?;
+    while !stop.load(Ordering::Acquire) {
+        let frame = latest.lock().unwrap_or_else(|poison| poison.into_inner()).take();
+        if let Some(frame) = frame {
+            let small = shrink_to_rgba(&frame.bgra, frame.width, frame.height, PREVIEW_WIDTH);
+            *preview.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(small);
+        }
+        if capture.is_finished() {
+            return Err("la captura de pantalla se cerró".into());
+        }
+        std::thread::sleep(interval);
+    }
+    capture.stop().map_err(|error| error.to_string())
 }
 
 trait CloneFresh {
@@ -855,6 +936,22 @@ fn graba_un_segundo() {
     assert!(audio_s > 0.8 && video_s > 0.8, "duración video={video_s} audio={audio_s}");
     assert!((video_s - audio_s).abs() < 0.5, "el video no acompaña al audio: {video_s} vs {audio_s}");
     let _ = std::fs::remove_file(&output);
+}
+
+/// Captura la pantalla de verdad: no forma parte de `cargo test`.
+#[test]
+#[ignore]
+fn muestra_un_monitor_sin_grabar() {
+    for monitor in monitors() {
+        let watch = ScreenWatch::start(monitor.id.clone()).expect("tiene que arrancar");
+        std::thread::sleep(Duration::from_millis(1500));
+        let preview = watch.take_preview().unwrap_or_else(|| panic!("sin cuadro: {:?}", watch.error()));
+        eprintln!("{} {}x{} -> vista {}x{}", monitor.name, monitor.width, monitor.height, preview.width, preview.height);
+        assert_eq!(preview.width, monitor.width.min(PREVIEW_WIDTH));
+        assert!(preview.rgba.chunks_exact(4).any(|pixel| pixel[..3] != [0, 0, 0]), "todo negro");
+        assert_eq!(watch.error(), None);
+    }
+    assert!(ScreenWatch::start(MonitorId("99".into())).is_err());
 }
 
 #[test]

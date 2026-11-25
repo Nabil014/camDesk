@@ -23,7 +23,9 @@ use theme::Tone;
 use update::{State as UpdateState, Updater};
 use video::{Command, Report, Video};
 use widgets::{Action, Icon};
-use record::{MicId, MonitorId, OutputId, RecordConfig, Recording, default_output, microphones, monitors, outputs};
+use record::{
+    MicId, MonitorId, OutputId, RecordConfig, Recording, ScreenWatch, default_output, microphones, monitors, outputs,
+};
 
 fn main() -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/camdesk.png"))
@@ -91,8 +93,11 @@ struct CamdeskApp {
     vcam: Option<vcam::VirtualCamera>,
     preview: Option<egui::TextureHandle>,
     recording: Option<Recording>,
-    /// Lo que se está grabando, y qué monitor era al empezar.
+    /// Lo que se está grabando o se va a grabar, y qué monitor se está grabando.
     screen: Option<egui::TextureHandle>,
+    /// Ver la pantalla sin grabar. No se guarda en la config: al abrir nunca se captura.
+    watch_screen: bool,
+    watch: Option<ScreenWatch>,
     recorded_monitor: String,
     /// Último MP4 guardado, para abrir su ubicación. Se recuerda entre sesiones.
     last_recording: Option<PathBuf>,
@@ -149,6 +154,8 @@ impl CamdeskApp {
             preview: None,
             recording: None,
             screen: None,
+            watch_screen: false,
+            watch: None,
             recorded_monitor: String::new(),
             last_recording: None,
             meter_shown: [0.0; 2],
@@ -394,6 +401,12 @@ impl CamdeskApp {
             })
             .response
             .labelled_by(name.id);
+        // Al grabar la pantalla ya se ve: la casilla vale para antes.
+        ui.add_enabled_ui(self.recording.is_none(), |ui| {
+            if widgets::checkbox(ui, &mut self.watch_screen, "Vista previa de la pantalla", Icon::None, "").changed() {
+                ui.ctx().request_repaint();
+            }
+        });
         ui.add_space(6.0);
         let [system, mic] = self.meter_shown;
         let [system_db, mic_db] = self.meter_text.map(level_db);
@@ -798,7 +811,7 @@ impl CamdeskApp {
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
         let camera = self.preview.is_some() && (self.status.starts_with("En vivo") || self.status == "Desconectado");
-        let screen = self.recording.is_some() && self.screen.is_some();
+        let screen = self.screen.is_some() && (self.recording.is_some() || self.watch.is_some());
         let count = if camera && screen { 2 } else { 1 };
         let (gap, caption_height) = (12.0, 24.0);
         let share = (area.width() - gap * (count - 1) as f32) / count as f32;
@@ -855,9 +868,18 @@ impl CamdeskApp {
             paint_picture(ui, frame, texture);
         }
         let inset = egui::vec2(12.0, 12.0);
-        widgets::badge(painter, frame.left_top() + inset, egui::Align2::LEFT_TOP, theme::REC, "PANTALLA", theme::TEXT);
-        self.rec_badge(painter, frame);
-        finish_frame(painter, frame, format!("Se graba {}", self.recorded_monitor));
+        let recording = self.recording.is_some();
+        let mark = if recording { theme::REC } else { theme::ACCENT };
+        widgets::badge(painter, frame.left_top() + inset, egui::Align2::LEFT_TOP, mark, "PANTALLA", theme::TEXT);
+        let caption = if recording {
+            self.rec_badge(painter, frame);
+            format!("Se graba {}", self.recorded_monitor)
+        } else {
+            let anchor = egui::pos2(frame.right() - inset.x, frame.top() + inset.y);
+            widgets::badge(painter, anchor, egui::Align2::RIGHT_TOP, theme::OFF, "SIN GRABAR", theme::TEXT_SOFT);
+            format!("Se va a grabar {}", self.monitor_label())
+        };
+        finish_frame(painter, frame, caption);
     }
 
     fn rec_badge(&self, painter: &egui::Painter, frame: egui::Rect) {
@@ -867,13 +889,20 @@ impl CamdeskApp {
         widgets::badge(painter, anchor, egui::Align2::RIGHT_TOP, theme::REC, &text, theme::REC_TEXT);
     }
 
-    /// Sube el último cuadro de la pantalla que dejó `record`. Al terminar de grabar se descarta.
+    /// Sube el último cuadro de la pantalla: el de la grabación, o el de la vista previa.
     fn poll_screen(&mut self, ctx: &egui::Context) {
-        let Some(recording) = &self.recording else {
+        let preview = if let Some(recording) = &self.recording {
+            // La grabación trae su propia imagen: no hace falta una segunda captura.
+            self.watch = None;
+            recording.take_preview()
+        } else if self.watch_screen {
+            self.keep_watching()
+        } else {
+            self.watch = None;
             self.screen = None;
             return;
         };
-        let Some(preview) = recording.take_preview() else { return };
+        let Some(preview) = preview else { return };
         let size = [preview.width as usize, preview.height as usize];
         let image = egui::ColorImage::from_rgba_unmultiplied(size, &preview.rgba);
         if let Some(texture) = self.screen.as_mut() {
@@ -881,6 +910,33 @@ impl CamdeskApp {
         } else {
             self.screen = Some(ctx.load_texture("pantalla", image, egui::TextureOptions::LINEAR));
         }
+    }
+
+    /// Deja la captura puesta en el monitor elegido, y la cambia si el elegido cambió.
+    fn keep_watching(&mut self) -> Option<record::ScreenPreview> {
+        self.ensure_monitors();
+        let wanted = self.monitor.clone().or_else(|| self.picked_monitor())?;
+        if self.watch.as_ref().map(ScreenWatch::monitor) != Some(&wanted) {
+            // Se borra la imagen anterior: no puede quedar bajo el nombre del monitor nuevo.
+            self.screen = None;
+            self.watch = None;
+            match ScreenWatch::start(wanted) {
+                Ok(watch) => self.watch = Some(watch),
+                Err(error) => self.stop_watching(error.message),
+            }
+        }
+        if let Some(error) = self.watch.as_ref().and_then(ScreenWatch::error) {
+            self.stop_watching(error);
+        }
+        self.watch.as_ref().and_then(ScreenWatch::take_preview)
+    }
+
+    fn stop_watching(&mut self, error: String) {
+        self.watch_screen = false;
+        self.watch = None;
+        self.screen = None;
+        self.notice = format!("Sin vista previa de la pantalla\n{error}");
+        app_log(&self.notice);
     }
 
     fn caption(&self) -> String {
@@ -1282,7 +1338,7 @@ impl eframe::App for CamdeskApp {
         if self.recording.is_some() {
             // Las barras de audio se mueven suave solo si se redibujan seguido.
             ctx.request_repaint_after(Duration::from_millis(16));
-        } else if self.connected {
+        } else if self.connected || self.watch.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
