@@ -24,10 +24,13 @@ use widgets::{Action, Icon};
 use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
 
 fn main() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/camdesk.png"))
+        .expect("icono inválido de Camdesk");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([1060.0, 640.0]),
+            .with_min_inner_size([1060.0, 640.0])
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(

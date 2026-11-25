@@ -16,6 +16,7 @@ ArchitecturesAllowed=x64compatible
 MinVersion=10.0.22000
 OutputDir=..\desktop\target\installer
 OutputBaseFilename=Camdesk-Setup
+SetupIconFile=..\desktop\crates\app\assets\camdesk.ico
 UninstallDisplayIcon={app}\camdesk.exe
 WizardStyle=modern
 

@@ -12,3 +12,6 @@ protocol = { path = "../protocol" }
 record = { path = "../record" }
 vcam = { path = "../vcam" }
 vcam-shm = { path = "../vcam-shm" }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.34"
