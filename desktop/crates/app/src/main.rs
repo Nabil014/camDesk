@@ -219,6 +219,9 @@ impl CamdeskApp {
                     }
                 } else {
                     self._blur_fx = None;
+                    if self.notice.starts_with("Modo rendimiento") {
+                        self.notice.clear();
+                    }
                 }
             }
             if self.blur_on {
@@ -519,6 +522,13 @@ impl CamdeskApp {
                 self.notice = error.message;
             } else if let Some(note) = self._blur_fx.as_ref().and_then(|fx| fx.notice()) {
                 self.blur_note = note.to_string();
+                let replace = self.notice.is_empty()
+                    || self.notice.starts_with("En vivo")
+                    || self.notice.starts_with("Teléfono vertical")
+                    || self.notice.starts_with("Modo rendimiento");
+                if replace {
+                    self.notice = "Modo rendimiento\nEl desenfoque pasó a modo rendimiento para sostener 30 fps.".into();
+                }
             }
         }
         self.color_fx.set(self.color);
@@ -1095,6 +1105,7 @@ fn notice_color(text: &str) -> egui::Color32 {
         || lower.contains("runtime")
         || lower.contains("gpu")
         || lower.contains("desenfo")
+        || lower.contains("rendimiento")
     {
         WARN
     } else {
