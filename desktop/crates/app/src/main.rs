@@ -14,13 +14,18 @@ use record::{MicId, MonitorId, RecordConfig, Recording, default_output, micropho
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1080.0, 720.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 700.0])
+            .with_min_inner_size([960.0, 600.0]),
         ..Default::default()
     };
     eframe::run_native(
         "Camdesk",
         options,
-        Box::new(|_cc| Ok(Box::new(CamdeskApp::load()))),
+        Box::new(|cc| {
+            apply_style(&cc.egui_ctx);
+            Ok(Box::new(CamdeskApp::load()))
+        }),
     )
 }
 
@@ -30,6 +35,7 @@ struct CamdeskApp {
     resolution: Resolution,
     camera: Camera,
     color: ColorParams,
+    color_open: bool,
     blur_on: bool,
     blur_strength: f32,
     blur: Option<BlurAvailability>,
@@ -73,6 +79,7 @@ impl CamdeskApp {
             resolution: Resolution::P720,
             camera: Camera::Back,
             color: ColorParams::default(),
+            color_open: false,
             blur_on: false,
             blur_strength: 0.5,
             blur: None,
@@ -104,81 +111,63 @@ impl CamdeskApp {
         app
     }
 
-    fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        self.poll(ctx);
-        ui.heading("Camdesk");
-        ui.label(format!("Estado: {}", self.status));
-        if !self.notice.is_empty() {
-            ui.colored_label(egui::Color32::from_rgb(220, 160, 60), &self.notice);
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                self.connection(ui);
-                ui.separator();
-                self.effects(ui);
-                ui.separator();
-                self.record_ui(ui);
+    fn rail(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("riel")
+            .exact_width(320.0)
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 8)))
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.connection(ui);
+                    self.effects(ui);
+                    self.record_ui(ui);
+                });
             });
-            ui.vertical(|ui| self.preview(ui));
-        });
-        if self.dirty {
-            self.write_config();
-            self.dirty = false;
-        }
     }
 
     fn connection(&mut self, ui: &mut egui::Ui) {
-        ui.label("Conexión");
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("modo")
-                .selected_text(match self.mode {
-                    LinkMode::Auto => "Automática",
-                    LinkMode::Usb => "Solo USB",
-                    LinkMode::Wifi => "Solo Wi-Fi",
-                })
-                .show_ui(ui, |ui| {
-                    self.dirty |= ui.selectable_value(&mut self.mode, LinkMode::Auto, "Automática").changed();
-                    self.dirty |= ui.selectable_value(&mut self.mode, LinkMode::Usb, "Solo USB").changed();
-                    self.dirty |= ui.selectable_value(&mut self.mode, LinkMode::Wifi, "Solo Wi-Fi").changed();
-                });
-            let ip = ui.add(egui::TextEdit::singleline(&mut self.ip).hint_text("IP del teléfono").desired_width(140.0));
-            self.dirty |= ip.changed();
-        });
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("resolucion")
-                .selected_text(match self.resolution {
-                    Resolution::P720 => "1280x720",
-                    Resolution::P1080 => "1920x1080",
-                })
-                .show_ui(ui, |ui| {
-                    self.dirty |= ui.selectable_value(&mut self.resolution, Resolution::P720, "1280x720").changed();
-                    self.dirty |= ui.selectable_value(&mut self.resolution, Resolution::P1080, "1920x1080").changed();
-                });
-            egui::ComboBox::from_id_salt("camara")
-                .selected_text(match self.camera {
-                    Camera::Back => "Trasera",
-                    Camera::Front => "Frontal",
-                })
-                .show_ui(ui, |ui| {
-                    self.dirty |= ui.selectable_value(&mut self.camera, Camera::Back, "Trasera").changed();
-                    self.dirty |= ui.selectable_value(&mut self.camera, Camera::Front, "Frontal").changed();
-                });
-        });
-        ui.horizontal(|ui| {
+        section(ui, "Conexión");
+        self.dirty |= segments(
+            ui,
+            &mut self.mode,
+            &[
+                ("Automática", LinkMode::Auto),
+                ("Solo USB", LinkMode::Usb),
+                ("Solo Wi-Fi", LinkMode::Wifi),
+            ],
+        );
+        let hint = if self.mode == LinkMode::Wifi { "IP del teléfono" } else { "IP, si hace falta" };
+        let ip = ui.add_enabled(
+            self.mode != LinkMode::Usb,
+            egui::TextEdit::singleline(&mut self.ip).hint_text(hint).desired_width(ui.available_width()),
+        );
+        self.dirty |= ip.changed();
+        self.dirty |= segments(ui, &mut self.resolution, &[("720p", Resolution::P720), ("1080p", Resolution::P1080)]);
+        self.dirty |= segments(ui, &mut self.camera, &[("Trasera", Camera::Back), ("Frontal", Camera::Front)]);
+        let label = if self.session.is_none() {
+            "Conectar"
+        } else if self.status == "Conectando" {
+            "Cancelar"
+        } else {
+            "Desconectar"
+        };
+        if action_button(ui, label, Action::Primary).clicked() {
             if self.session.is_none() {
-                if ui.button("Conectar").clicked() {
-                    self.connect();
-                }
-            } else if ui.button("Desconectar").clicked() {
-                self.session = None;
-                self.events = None;
-                if let Some(decoder) = self.decoder.as_mut() {
-                    decoder.reset();
-                }
-                self.status = "Desconectado".into();
+                self.connect();
+            } else {
+                self.disconnect();
             }
-        });
+        }
+    }
+
+    fn disconnect(&mut self) {
+        self.session = None;
+        self.events = None;
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.reset();
+        }
+        self.status = "Desconectado".into();
     }
 
     fn effects(&mut self, ui: &mut egui::Ui) {
@@ -186,14 +175,14 @@ impl CamdeskApp {
             self.blur = Some(blur_availability());
             self.blur_note = match self.blur {
                 Some(BlurAvailability::Available) => String::new(),
-                Some(BlurAvailability::NoNvidiaGpu) => "sin GPU NVIDIA".into(),
-                Some(BlurAvailability::NoRuntime) | None => "sin el runtime de NVIDIA Video Effects".into(),
+                Some(BlurAvailability::NoNvidiaGpu) => "Sin GPU NVIDIA. No hay efecto de respaldo.".into(),
+                Some(BlurAvailability::NoRuntime) | None => "Sin el runtime de NVIDIA Video Effects. No hay efecto de respaldo.".into(),
             };
         }
-        ui.label("Efectos");
+        section(ui, "Imagen");
         let available = matches!(self.blur, Some(BlurAvailability::Available));
         ui.add_enabled_ui(available, |ui| {
-            if ui.checkbox(&mut self.blur_on, "Desenfocar fondo").changed() {
+            if toggle(ui, &mut self.blur_on, "Desenfocar fondo").changed() {
                 self.dirty = true;
                 if self.blur_on {
                     match BackgroundBlur::new() {
@@ -212,15 +201,19 @@ impl CamdeskApp {
                     self._blur_fx = None;
                 }
             }
-            if ui.add(egui::Slider::new(&mut self.blur_strength, 0.0..=1.0).text("Fuerza")).changed() {
-                self.dirty = true;
-                if let Some(fx) = self._blur_fx.as_mut() {
-                    fx.set_strength(self.blur_strength);
+            if self.blur_on {
+                let mut percent = (self.blur_strength * 100.0).round();
+                if labeled_slider(ui, "Fuerza", &mut percent, 0.0..=100.0, true) {
+                    self.blur_strength = percent / 100.0;
+                    self.dirty = true;
+                    if let Some(fx) = self._blur_fx.as_mut() {
+                        fx.set_strength(self.blur_strength);
+                    }
                 }
             }
         });
         if !self.blur_note.is_empty() {
-            ui.label(&self.blur_note);
+            ui.label(egui::RichText::new(&self.blur_note).size(12.0).color(MUTED));
         }
         if !available {
             ui.hyperlink_to(
@@ -228,52 +221,62 @@ impl CamdeskApp {
                 "https://www.nvidia.com/en-us/geforce/broadcasting/broadcast-sdk/resources/",
             );
         }
-        let mut changed = false;
-        changed |= ui.add(egui::Slider::new(&mut self.color.brightness, -1.0..=1.0).text("Brillo")).changed();
-        changed |= ui.add(egui::Slider::new(&mut self.color.contrast, -1.0..=1.0).text("Contraste")).changed();
-        changed |= ui.add(egui::Slider::new(&mut self.color.saturation, -1.0..=1.0).text("Saturación")).changed();
-        changed |= ui.add(egui::Slider::new(&mut self.color.temperature, -1.0..=1.0).text("Temperatura")).changed();
-        if changed {
-            self.dirty = true;
+        if disclosure(ui, "Corrección de color", color_adjusted(&self.color).then_some("Ajustada")).clicked() {
+            self.color_open = !self.color_open;
         }
-        if ui.button("Restablecer").clicked() {
-            self.color = ColorParams::default();
-            self.dirty = true;
+        if self.color_open {
+            let mut changed = false;
+            changed |= labeled_slider(ui, "Brillo", &mut self.color.brightness, -1.0..=1.0, false);
+            changed |= labeled_slider(ui, "Contraste", &mut self.color.contrast, -1.0..=1.0, false);
+            changed |= labeled_slider(ui, "Saturación", &mut self.color.saturation, -1.0..=1.0, false);
+            changed |= labeled_slider(ui, "Temperatura", &mut self.color.temperature, -1.0..=1.0, false);
+            if changed {
+                self.dirty = true;
+            }
+            if ui
+                .add(
+                    egui::Button::new(egui::RichText::new("Restablecer").color(INFO))
+                        .fill(egui::Color32::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE),
+                )
+                .clicked()
+            {
+                self.color = ColorParams::default();
+                self.dirty = true;
+            }
         }
     }
 
     fn record_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Grabación");
-        self.ensure_monitors();
-        let monitor_label = self
-            .monitors
-            .iter()
-            .find(|item| Some(&item.id) == self.monitor.as_ref())
-            .map(|item| monitor_text(item))
-            .unwrap_or_else(|| "Elegir monitor".into());
-        egui::ComboBox::from_id_salt("monitor")
-            .width(220.0)
-            .selected_text(monitor_label)
-            .show_ui(ui, |ui| {
-                for item in &self.monitors {
-                    let selected = self.monitor.as_ref() == Some(&item.id);
-                    if ui.selectable_label(selected, monitor_text(item)).clicked() {
-                        self.monitor = Some(item.id.clone());
-                        self.monitor_size = Some((item.width, item.height));
-                        self.dirty = true;
+        section(ui, "Grabación");
+        ui.horizontal(|ui| {
+            ui.label("Monitor");
+            let label = self.monitor_label();
+            egui::ComboBox::from_id_salt("monitor")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    self.ensure_monitors();
+                    for item in &self.monitors {
+                        let selected = self.monitor.as_ref() == Some(&item.id);
+                        if ui.selectable_label(selected, monitor_text(item)).clicked() {
+                            self.monitor = Some(item.id.clone());
+                            self.monitor_size = Some((item.width, item.height));
+                            self.dirty = true;
+                        }
                     }
-                }
-            });
-        self.dirty |= ui.checkbox(&mut self.system_audio, "Audio del sistema").changed();
-        self.dirty |= ui.checkbox(&mut self.mic_on, "Micrófono").changed();
-        let mic_label = self
-            .mics
-            .iter()
-            .find(|item| Some(&item.id) == self.mic.as_ref())
-            .map(|item| item.name.clone())
-            .unwrap_or_else(|| "Elegir micrófono".into());
-        ui.add_enabled_ui(self.mic_on, |ui| {
+                });
+        });
+        self.dirty |= toggle(ui, &mut self.system_audio, "Audio del sistema").changed();
+        self.dirty |= toggle(ui, &mut self.mic_on, "Micrófono").changed();
+        if self.mic_on {
+            let mic_label = self
+                .mics
+                .iter()
+                .find(|item| Some(&item.id) == self.mic.as_ref())
+                .map(|item| item.name.clone())
+                .unwrap_or_else(|| "Elegir micrófono".into());
             egui::ComboBox::from_id_salt("microfono")
+                .width(ui.available_width())
                 .selected_text(mic_label)
                 .show_ui(ui, |ui| {
                     if self.mics.is_empty() {
@@ -290,20 +293,17 @@ impl CamdeskApp {
                         }
                     }
                 });
-        });
-        ui.horizontal(|ui| {
-            if self.recording.is_none() {
-                if ui.button("Grabar").clicked() {
-                    self.start_recording();
-                }
+        }
+        let recording = self.recording.is_some();
+        let label = if recording { "Detener" } else { "Grabar" };
+        let kind = if recording { Action::Danger } else { Action::Quiet };
+        if action_button(ui, label, kind).clicked() {
+            if recording {
+                self.stop_recording();
             } else {
-                let elapsed = self.recording.as_ref().map(|rec| rec.elapsed()).unwrap_or_default();
-                ui.label(format_elapsed(elapsed));
-                if ui.button("Detener").clicked() {
-                    self.stop_recording();
-                }
+                self.start_recording();
             }
-        });
+        }
         if let Some(rec) = &self.recording {
             if let Some(error) = rec.error() {
                 self.notice = error;
@@ -498,26 +498,75 @@ impl CamdeskApp {
         self.canvas_uv = uv;
     }
 
-    fn preview(&self, ui: &mut egui::Ui) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(640.0, 360.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(18, 18, 18));
-        let Some(texture) = &self.preview else {
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                "La imagen aparece al conectar",
-                egui::FontId::proportional(16.0),
-                egui::Color32::from_rgb(160, 160, 160),
-            );
-            return;
-        };
+    fn preview_pane(&self, ui: &mut egui::Ui) {
+        let available = ui.available_size();
+        let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+        let caption = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 22.0), rect.right_bottom());
+        let canvas = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), caption.top())).shrink(8.0);
+        let live = self.status.starts_with("En vivo");
+        let frozen = self.status == "Desconectado" && self.preview.is_some();
+        if (live || frozen) && self.paint_frame(ui, canvas) {
+            // La imagen ya está pintada.
+        } else {
+            let galley = ui.painter().layout(self.empty_copy(), egui::FontId::proportional(14.0), MUTED, canvas.width().min(420.0));
+            ui.painter().galley(canvas.center() - galley.size() * 0.5, galley, MUTED);
+        }
+        ui.painter().text(
+            caption.left_center(),
+            egui::Align2::LEFT_CENTER,
+            self.caption(),
+            egui::FontId::proportional(12.0),
+            MUTED,
+        );
+    }
+
+    fn paint_frame(&self, ui: &egui::Ui, canvas: egui::Rect) -> bool {
+        let Some(texture) = &self.preview else { return false };
         let size = texture.size_vec2();
         if size.x <= 0.0 || size.y <= 0.0 {
-            return;
+            return false;
         }
-        let scale = (rect.width() / size.x).min(rect.height() / size.y);
-        let fitted = egui::Rect::from_center_size(rect.center(), egui::vec2(size.x * scale, size.y * scale));
-        egui::Image::from_texture(texture).paint_at(ui, fitted);
+        let scale = (canvas.width() / size.x).min(canvas.height() / size.y);
+        let fitted = egui::Rect::from_center_size(canvas.center(), egui::vec2(size.x * scale, size.y * scale));
+        egui::Image::from_texture(texture)
+            .corner_radius(egui::CornerRadius::same(12))
+            .paint_at(ui, fitted);
+        if self.recording.is_some() {
+            paint_badge(ui, fitted.left_top() + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, "REC", REC);
+        }
+        if self.status == "Desconectado" {
+            paint_badge(ui, fitted.right_bottom() - egui::vec2(12.0, 12.0), egui::Align2::RIGHT_BOTTOM, "Último cuadro", WARN);
+        }
+        true
+    }
+
+    fn caption(&self) -> String {
+        let Some(texture) = &self.preview else {
+            return "Zoom recibe cellCam a 1920×1080".into();
+        };
+        if !self.status.starts_with("En vivo") && self.status != "Desconectado" {
+            return "Zoom recibe cellCam a 1920×1080".into();
+        }
+        let size = texture.size_vec2();
+        let cam = match self.camera {
+            Camera::Back => "Trasera",
+            Camera::Front => "Frontal",
+        };
+        let link = match self.mode {
+            LinkMode::Auto => "Automática",
+            LinkMode::Usb => "USB",
+            LinkMode::Wifi => "Wi-Fi",
+        };
+        let bars = if size.y > size.x { " con barras" } else { "" };
+        format!("{}×{} · {cam} · {link} · Zoom recibe 1920×1080{bars}", size.x as u32, size.y as u32)
+    }
+
+    fn empty_copy(&self) -> String {
+        match self.status.as_str() {
+            "Conectando" => "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.".into(),
+            "Ocupado" | "Teléfono no autorizado" | "Versión incompatible" => "Sin imagen.".into(),
+            _ => "La imagen aparece al conectar. Hasta el primer cuadro, Zoom ve la cámara en negro.".into(),
+        }
     }
 
     fn ensure_monitors(&mut self) {
@@ -535,6 +584,15 @@ impl CamdeskApp {
             }
         }
         self.monitors.first().map(|item| item.id.clone())
+    }
+
+    fn monitor_label(&self) -> String {
+        self.monitors
+            .iter()
+            .find(|item| Some(&item.id) == self.monitor.as_ref())
+            .map(monitor_text)
+            .or_else(|| self.monitor_size.map(|(width, height)| format!("{width}×{height}")))
+            .unwrap_or_else(|| "Pantalla".into())
     }
 
     fn start_recording(&mut self) {
@@ -652,12 +710,233 @@ impl CamdeskApp {
 
 impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| self.ui(ctx, ui));
+        self.poll(ctx);
+        self.rail(ctx);
+        if !self.notice.is_empty() {
+            egui::TopBottomPanel::top("aviso")
+                .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(18, 8)))
+                .show_separator_line(false)
+                .show(ctx, |ui| {
+                    ui.label(egui::RichText::new(&self.notice).color(notice_color(&self.notice)));
+                });
+        }
+        egui::TopBottomPanel::bottom("estado")
+            .exact_height(36.0)
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(18, 0)))
+            .show_separator_line(true)
+            .show(ctx, |ui| {
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new("cellCam").color(MUTED));
+                    ui.label(egui::RichText::new(&self.status).color(status_color(&self.status)));
+                    if let Some(recording) = &self.recording {
+                        let elapsed = format_elapsed(recording.elapsed());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!("REC  {elapsed}")).color(REC).strong());
+                        });
+                    }
+                });
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin::symmetric(16, 10)))
+            .show(ctx, |ui| self.preview_pane(ui));
+        if self.dirty {
+            self.write_config();
+            self.dirty = false;
+        }
         if self.session.is_some() {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if self.recording.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+    }
+}
+
+const BG: egui::Color32 = egui::Color32::from_rgb(0x12, 0x12, 0x12);
+const FIELD: egui::Color32 = egui::Color32::from_rgb(0x1b, 0x1b, 0x1b);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(0xf2, 0xf2, 0xf2);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(0x9c, 0x9c, 0x9c);
+const LIVE: egui::Color32 = egui::Color32::from_rgb(0x3d, 0xba, 0x86);
+const REC: egui::Color32 = egui::Color32::from_rgb(0xe2, 0x3d, 0x3d);
+const WARN: egui::Color32 = egui::Color32::from_rgb(0xd7, 0xa4, 0x41);
+const INFO: egui::Color32 = egui::Color32::from_rgb(0x9e, 0xc0, 0xdc);
+const DANGER: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x7a, 0x7a);
+const INK: egui::Color32 = egui::Color32::from_rgb(0x14, 0x14, 0x14);
+
+enum Action {
+    Primary,
+    Quiet,
+    Danger,
+}
+
+fn apply_style(ctx: &egui::Context) {
+    let mut style = (*ctx.style()).clone();
+    style.visuals.dark_mode = true;
+    style.visuals.panel_fill = BG;
+    style.visuals.window_fill = BG;
+    style.visuals.extreme_bg_color = FIELD;
+    style.visuals.faint_bg_color = FIELD;
+    style.visuals.override_text_color = Some(TEXT);
+    style.visuals.hyperlink_color = INFO;
+    style.visuals.selection.bg_fill = egui::Color32::from_rgb(0x2c, 0x2c, 0x2c);
+    style.visuals.selection.stroke = egui::Stroke::NONE;
+    style.visuals.window_stroke = egui::Stroke::NONE;
+    let radius = egui::CornerRadius::same(8);
+    for visuals in [
+        &mut style.visuals.widgets.noninteractive,
+        &mut style.visuals.widgets.inactive,
+        &mut style.visuals.widgets.hovered,
+        &mut style.visuals.widgets.active,
+        &mut style.visuals.widgets.open,
+    ] {
+        visuals.corner_radius = radius;
+        visuals.bg_stroke = egui::Stroke::NONE;
+    }
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(22));
+    style.visuals.widgets.noninteractive.fg_stroke.color = TEXT;
+    style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
+    style.visuals.widgets.inactive.weak_bg_fill = egui::Color32::TRANSPARENT;
+    style.visuals.widgets.inactive.fg_stroke.color = TEXT;
+    style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x32, 0x32, 0x32);
+    style.visuals.widgets.hovered.weak_bg_fill = egui::Color32::from_rgb(0x2a, 0x2a, 0x2a);
+    style.visuals.widgets.hovered.fg_stroke.color = TEXT;
+    style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(0x3a, 0x3a, 0x3a);
+    style.visuals.widgets.active.weak_bg_fill = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+    style.visuals.widgets.active.fg_stroke.color = TEXT;
+    style.visuals.widgets.open.bg_fill = FIELD;
+    style.visuals.widgets.open.fg_stroke.color = TEXT;
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
+    ctx.set_style(style);
+}
+
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(title.to_uppercase()).size(11.0).color(MUTED).strong());
+    ui.add_space(2.0);
+}
+
+fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, value: &mut T, options: &[(&str, T)]) -> bool {
+    let mut changed = false;
+    egui::Frame::new()
+        .fill(FIELD)
+        .corner_radius(9.0)
+        .inner_margin(egui::Margin::same(2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.columns(options.len(), |cols| {
+                for (col, (label, option)) in cols.iter_mut().zip(options) {
+                    col.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    let selected = *value == *option;
+                    let text = egui::RichText::new(*label).size(12.0).color(if selected { TEXT } else { MUTED });
+                    let button = egui::Button::new(text)
+                        .fill(if selected { egui::Color32::from_rgb(0x2c, 0x2c, 0x2c) } else { egui::Color32::TRANSPARENT })
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(7.0)
+                        .wrap_mode(egui::TextWrapMode::Extend)
+                        .min_size(egui::vec2(col.available_width(), 28.0));
+                    if col.add(button).clicked() && !selected {
+                        *value = *option;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
+}
+
+fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
+    let (rect, mut response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    let painter = ui.painter();
+    painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
+    let switch = egui::Rect::from_center_size(egui::pos2(rect.right() - 17.0, rect.center().y), egui::vec2(34.0, 20.0));
+    let track = if *on { egui::Color32::from_rgb(0x2f, 0x6d, 0x52) } else { egui::Color32::from_rgb(0x2a, 0x2a, 0x2a) };
+    painter.rect_filled(switch, 10.0, track);
+    let knob_x = if *on { switch.right() - 10.0 } else { switch.left() + 10.0 };
+    let knob = if *on { egui::Color32::WHITE } else { egui::Color32::from_rgb(0x9a, 0x9a, 0x9a) };
+    painter.circle_filled(egui::pos2(knob_x, switch.center().y), 7.0, knob);
+    response
+}
+
+fn disclosure(ui: &mut egui::Ui, label: &str, flag: Option<&str>) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
+    let painter = ui.painter();
+    painter.text(rect.left_center(), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), TEXT);
+    if let Some(flag) = flag {
+        painter.text(rect.right_center(), egui::Align2::RIGHT_CENTER, flag, egui::FontId::proportional(12.0), WARN);
+    }
+    response
+}
+
+fn labeled_slider(ui: &mut egui::Ui, label: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, integer: bool) -> bool {
+    let mut slider = egui::Slider::new(value, range).text(label);
+    if integer {
+        slider = slider.integer();
+    }
+    ui.add(slider).changed()
+}
+
+fn action_button(ui: &mut egui::Ui, text: &str, kind: Action) -> egui::Response {
+    let (fill, color, stroke) = match kind {
+        Action::Primary => (egui::Color32::from_rgb(0xf2, 0xf2, 0xf2), INK, egui::Stroke::NONE),
+        Action::Quiet => (egui::Color32::TRANSPARENT, TEXT, egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(36))),
+        Action::Danger => (REC, egui::Color32::WHITE, egui::Stroke::NONE),
+    };
+    ui.add(
+        egui::Button::new(egui::RichText::new(text).color(color).strong())
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(9.0)
+            .min_size(egui::vec2(ui.available_width(), 34.0)),
+    )
+}
+
+fn paint_badge(ui: &egui::Ui, anchor: egui::Pos2, align: egui::Align2, text: &str, color: egui::Color32) {
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), egui::FontId::proportional(11.0), color);
+    let pad = egui::vec2(8.0, 4.0);
+    let rect = align.anchor_size(anchor, galley.size() + pad * 2.0);
+    ui.painter().rect_filled(rect, 10.0, egui::Color32::from_black_alpha(150));
+    ui.painter().galley(rect.min + pad, galley, color);
+}
+
+fn color_adjusted(color: &ColorParams) -> bool {
+    color.brightness.abs() > 0.001 || color.contrast.abs() > 0.001 || color.saturation.abs() > 0.001 || color.temperature.abs() > 0.001
+}
+
+fn status_color(status: &str) -> egui::Color32 {
+    if status.starts_with("En vivo") {
+        LIVE
+    } else if status == "Conectando" {
+        INFO
+    } else if status == "Ocupado" || status == "Teléfono no autorizado" {
+        WARN
+    } else if status == "Versión incompatible" {
+        DANGER
+    } else {
+        TEXT
+    }
+}
+
+fn notice_color(text: &str) -> egui::Color32 {
+    let lower = text.to_lowercase();
+    if lower.contains("incompatible") || lower.contains("error") || lower.contains("no hay") {
+        DANGER
+    } else if lower.contains("guardad") || lower.contains("grabando") {
+        LIVE
+    } else if lower.contains("falta")
+        || lower.contains("no es válida")
+        || lower.contains("ocup")
+        || lower.contains("autoriz")
+        || lower.contains("nvidia")
+        || lower.contains("runtime")
+        || lower.contains("gpu")
+    {
+        WARN
+    } else {
+        INFO
     }
 }
 
@@ -753,7 +1032,7 @@ fn monitor_text(item: &record::MonitorInfo) -> String {
 fn status_text(status: Status) -> String {
     match status {
         Status::Conectando => "Conectando".into(),
-        Status::EnVivo { width, height, .. } => format!("En vivo {width}x{height}"),
+        Status::EnVivo { width, height, .. } => format!("En vivo {width}×{height}"),
         Status::Desconectado => "Desconectado".into(),
         Status::Ocupado => "Ocupado".into(),
         Status::NoAutorizado => "Teléfono no autorizado".into(),
