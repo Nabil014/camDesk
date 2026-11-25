@@ -638,8 +638,12 @@ impl CamdeskApp {
             output: output.clone(),
         }) {
             Ok(recording) => {
-                self.notice = format!("Grabando con {} en {}", recording.encoder(), output.display());
                 self.recording = Some(recording);
+                self.notice = if self.status.starts_with("En vivo") {
+                    "Grabando 00:00\nGraba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes.".into()
+                } else {
+                    "Grabando sin cámara\nLa grabación es otro trabajo. Empieza aunque no haya teléfono.".into()
+                };
             }
             Err(error) => self.notice = error.message,
         }
@@ -651,6 +655,16 @@ impl CamdeskApp {
                 Ok(path) => self.notice = format!("Grabación guardada\n{}", path.display()),
                 Err(error) => self.notice = error.message,
             }
+        }
+    }
+
+    fn refresh_recording_notice(&mut self) {
+        let Some(recording) = &self.recording else { return };
+        if self.status.starts_with("En vivo") && self.notice.starts_with("Grabando ") {
+            let elapsed = format_elapsed(recording.elapsed());
+            self.notice = format!(
+                "Grabando {elapsed}\nGraba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes."
+            );
         }
     }
 
@@ -728,6 +742,7 @@ impl CamdeskApp {
 impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.refresh_recording_notice();
         self.rail(ctx);
         if !self.notice.is_empty() {
             egui::TopBottomPanel::top("aviso")
@@ -964,6 +979,8 @@ fn notice_color(text: &str) -> egui::Color32 {
     let lower = text.to_lowercase();
     if lower.contains("incompatible") || lower.contains("error") || lower.contains("no hay") {
         DANGER
+    } else if lower.contains("sin cámara") {
+        INFO
     } else if lower.contains("guardad") || lower.contains("grabando") {
         LIVE
     } else if lower.contains("falta")
