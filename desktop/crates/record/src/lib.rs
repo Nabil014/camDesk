@@ -5,7 +5,7 @@ mod mux;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -140,6 +140,24 @@ struct SharedAudio {
     mic: VecDeque<f32>,
 }
 
+struct Levels {
+    system: AtomicU32,
+    mic: AtomicU32,
+}
+
+impl Levels {
+    fn new() -> Self {
+        Self { system: AtomicU32::new(0), mic: AtomicU32::new(0) }
+    }
+
+    fn pair(&self) -> (f32, f32) {
+        (
+            f32::from_bits(self.system.load(Ordering::Relaxed)),
+            f32::from_bits(self.mic.load(Ordering::Relaxed)),
+        )
+    }
+}
+
 pub struct Recording {
     stop: Arc<AtomicBool>,
     started: Instant,
@@ -147,6 +165,7 @@ pub struct Recording {
     path: PathBuf,
     encoder: String,
     failure: Arc<Mutex<Option<String>>>,
+    levels: Arc<Levels>,
 }
 
 impl Recording {
@@ -164,15 +183,17 @@ impl Recording {
         let encoder = mux.encoder().to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let failure = Arc::new(Mutex::new(None));
+        let levels = Arc::new(Levels::new());
         let stop_thread = stop.clone();
         let failure_thread = failure.clone();
+        let levels_thread = levels.clone();
         let system_audio = cfg.system_audio;
         let mic = cfg.mic.clone();
         let monitor_id = cfg.monitor.0.clone();
         let join = std::thread::Builder::new()
             .name("camdesk-record".into())
             .spawn(move || {
-                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, system_audio, mic) {
+                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, system_audio, mic, levels_thread) {
                     *failure_thread.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error.clone());
                     return Err(error);
                 }
@@ -186,11 +207,17 @@ impl Recording {
             path: cfg.output,
             encoder,
             failure,
+            levels,
         })
     }
 
     pub fn elapsed(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    /// Nivel reciente de 0 a 1: audio del sistema y micrófono. 0 es silencio.
+    pub fn levels(&self) -> (f32, f32) {
+        self.levels.pair()
     }
 
     pub fn encoder(&self) -> &str {
@@ -272,6 +299,7 @@ fn run(
     height: u32,
     system_audio: bool,
     mic: Option<MicId>,
+    levels: Arc<Levels>,
 ) -> Result<(), String> {
     let index: usize = monitor_id.parse().map_err(|_| "el monitor no tiene índice".to_string())?;
     let monitor = Monitor::from_index(index).map_err(|error| error.to_string())?;
@@ -296,7 +324,7 @@ fn run(
     let mic_id = mic.map(|id| id.0);
     let audio_thread = std::thread::Builder::new()
         .name("camdesk-audio".into())
-        .spawn(move || audio_loop(audio_stop, audio_slot, system_audio, mic_id))
+        .spawn(move || audio_loop(audio_stop, audio_slot, system_audio, mic_id, levels))
         .map_err(|error| error.to_string())?;
 
     let freq = qpc_freq();
@@ -417,7 +445,13 @@ struct OpenCapture {
     id: String,
 }
 
-fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, system_audio: bool, mic: Option<String>) {
+fn audio_loop(
+    stop: Arc<AtomicBool>,
+    slot: Arc<Mutex<SharedAudio>>,
+    system_audio: bool,
+    mic: Option<String>,
+    levels: Arc<Levels>,
+) {
     let _ = initialize_mta();
     let mut loopback: Option<OpenCapture> = None;
     let mut microphone: Option<OpenCapture> = None;
@@ -444,22 +478,34 @@ fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, system_audio
         if let Some(source) = loopback.as_ref() {
             match read_floats(&source.capture, &mut scratch) {
                 Ok(samples) if !samples.is_empty() => {
+                    note_level(&levels.system, &samples);
                     slot.lock().unwrap_or_else(|poison| poison.into_inner()).loopback.extend(samples);
                     read_any = true;
                 }
-                Ok(_) => {}
-                Err(_) => loopback = None,
+                Ok(_) => note_level(&levels.system, &[]),
+                Err(_) => {
+                    note_level(&levels.system, &[]);
+                    loopback = None;
+                }
             }
+        } else if system_audio {
+            note_level(&levels.system, &[]);
         }
         if let Some(source) = microphone.as_ref() {
             match read_floats(&source.capture, &mut scratch) {
                 Ok(samples) if !samples.is_empty() => {
+                    note_level(&levels.mic, &samples);
                     slot.lock().unwrap_or_else(|poison| poison.into_inner()).mic.extend(samples);
                     read_any = true;
                 }
-                Ok(_) => {}
-                Err(_) => microphone = None,
+                Ok(_) => note_level(&levels.mic, &[]),
+                Err(_) => {
+                    note_level(&levels.mic, &[]);
+                    microphone = None;
+                }
             }
+        } else if mic.is_some() {
+            note_level(&levels.mic, &[]);
         }
         if !read_any {
             std::thread::sleep(Duration::from_millis(5));
@@ -471,6 +517,22 @@ fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, system_audio
     if let Some(source) = microphone.as_ref() {
         let _ = source.client.stop_stream();
     }
+}
+
+fn note_level(slot: &AtomicU32, samples: &[f32]) {
+    let mut peak = 0f32;
+    for sample in samples {
+        peak = peak.max(sample.abs());
+    }
+    let target = if peak <= 1e-7 {
+        0.0
+    } else {
+        let db = 20.0 * peak.log10();
+        ((db + 48.0) / 48.0).clamp(0.0, 1.0)
+    };
+    let current = f32::from_bits(slot.load(Ordering::Relaxed));
+    let next = if target >= current { target } else { current * 0.85 };
+    slot.store(next.to_bits(), Ordering::Relaxed);
 }
 
 fn open_loopback() -> Result<OpenCapture, wasapi::WasapiError> {
