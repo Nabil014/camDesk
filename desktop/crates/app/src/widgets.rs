@@ -191,6 +191,21 @@ pub fn big_button(ui: &mut Ui, text: &str, action: Action) -> Response {
     response
 }
 
+/// Botón chico con el color de acción, para la barra de arriba.
+pub fn small_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 28.0;
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(text).font(semibold(12.0)).color(theme::INK))
+                .fill(theme::ACCENT)
+                .stroke(Stroke::NONE)
+                .corner_radius(6.0),
+        )
+    })
+    .inner
+}
+
 /// Botón chico y sin relleno, como «Restablecer».
 pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
     ui.scope(|ui| {

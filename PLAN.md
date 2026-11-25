@@ -332,6 +332,21 @@ Español. Controles de la primera versión:
 
 Diseño vigente: «Camdesk — consola oscura, inspirada en OBS» (lienzo «Camdesk UI»); reemplaza a `docs/camdesk-ux.html`. De arriba abajo: barra con la marca; vista previa en un marco 16:9 con las marcas EN VIVO, REC y «Último cuadro», y el epígrafe debajo; cuatro docks (Conexión, Efectos, Grabación, Controles); pie con el estado, el formato de la cámara y, al grabar, el tiempo y el encoder. Los avisos van en el dock Controles, no arriba. Los tokens están en `app/src/theme.rs`: un solo acento azul para acciones; verde, ámbar y rojo solo para estado. Los controles pintados a mano están en `app/src/widgets.rs` y declaran nombre y estado para el lector de pantalla. Fuentes: Inter y JetBrains Mono si están instaladas en Windows; si no, Segoe UI y Cascadia Mono. No se empaquetan fuentes. La ventana abre en 1280×800 y no baja de 1060×640; en una ventana baja los docks se desplazan.
 
+## Actualizaciones
+
+El repo es público y las versiones se publican como releases de GitHub (`Nabil014/camDesk`). Código en `app/src/update.rs`; publicación en `installer/publish.ps1`.
+
+- La versión sale solo de `desktop/crates/app/Cargo.toml`. La ventana la muestra al lado de la marca y el instalador la recibe del script.
+- Cada release lleva `Camdesk-Setup.exe`, `camdesk-update.txt` (`version=` y `sha256=` del instalador) y `camdesk-update.txt.sig` (Ed25519 del manifiesto).
+- La app lleva la clave pública. La privada está en `%USERPROFILE%\.camdesk\release-key.pem` de quien publica y nunca en el repo. Sin firma válida, o si el hash no coincide, no se ejecuta nada.
+- La app consulta `releases/latest/download/` una vez por ejecución, en un hilo aparte, después de mostrar la ventana. No usa la API de GitHub ni manda datos del usuario. Si falla, queda en el log y no se muestra nada. Una compilación de depuración no consulta salvo con `CAMDESK_UPDATE_URL`.
+- Solo ofrece una versión mayor que la propia. Aparece «Actualizar a vX.Y.Z» arriba a la derecha. Nada se descarga ni se instala sin ese clic.
+- Mientras se graba o hay una sesión con el teléfono, el botón está deshabilitado y dice por qué. Si eso empieza durante la descarga, queda «Instalar vX.Y.Z» para después.
+- Instala con `/SILENT /RELAUNCH=1`: la app se cierra, el instalador reemplaza los archivos y la vuelve a abrir. La config de `%LOCALAPPDATA%` se conserva.
+- Descargas en `%LOCALAPPDATA%\Camdesk\updates`.
+- La primera publicada es la 1.0.0. Las compilaciones anteriores no saben actualizarse: la 1.0.0 se instala a mano.
+- `publish.ps1` compila aparte (`target/dist`) y reemplaza las rutas locales: el instalador público no lleva el usuario de Windows ni las carpetas de quien publica.
+
 ## Orden de trabajo
 
 0. Esqueleto del workspace con todos los crates vacíos que compilan (dueño: Aplicación). Copiar `docs/PROTOCOL-v1.md`. Paso 0 de la cámara virtual, en Windows.

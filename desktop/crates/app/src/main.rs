@@ -7,6 +7,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod theme;
+mod update;
 mod video;
 mod widgets;
 
@@ -19,6 +20,7 @@ use fx::{BlurAvailability, ColorParams, blur_availability};
 use link::{Camera, Mode, Resolution, SessionConfig, Status, Transport};
 use protocol::Rotation;
 use theme::Tone;
+use update::{State as UpdateState, Updater};
 use video::{Command, Report, Video};
 use widgets::{Action, Icon};
 use record::{MicId, MonitorId, OutputId, RecordConfig, Recording, default_output, microphones, monitors, outputs};
@@ -92,6 +94,7 @@ struct CamdeskApp {
     dirty: bool,
     /// Alto que pidieron los docks en el cuadro anterior.
     dock_height: f32,
+    updater: Updater,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +141,7 @@ impl CamdeskApp {
             recording: None,
             dirty: false,
             dock_height: 360.0,
+            updater: Updater::new(),
         };
         app.read_config();
         app
@@ -1045,12 +1049,90 @@ impl CamdeskApp {
 }
 
 impl CamdeskApp {
-    fn header(&self, ui: &mut egui::Ui) {
+    fn header(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_centered(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             widgets::logo(ui);
             ui.label(egui::RichText::new("Camdesk").font(theme::semibold(14.0)));
+            ui.label(egui::RichText::new(format!("v{}", update::CURRENT)).font(theme::mono(11.0)).color(theme::MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.update_controls(ui));
         });
+    }
+
+    /// Cerrar la app para instalar corta la cámara y la grabación: solo con las dos quietas.
+    fn busy_for_update(&self) -> Option<&'static str> {
+        if self.recording.is_some() {
+            Some("Disponible al terminar la grabación")
+        } else if self.connected {
+            Some("Disponible al desconectar")
+        } else {
+            None
+        }
+    }
+
+    /// Se dibuja de derecha a izquierda: primero el botón, después el texto.
+    fn update_controls(&mut self, ui: &mut egui::Ui) {
+        let busy = self.busy_for_update();
+        let text = |value: String, color: egui::Color32| egui::RichText::new(value).font(theme::body(12.0)).color(color);
+        let mut start = None;
+        let mut install = false;
+        match &self.updater.state {
+            UpdateState::Quiet | UpdateState::Checking(_) => {}
+            UpdateState::Available(release) => {
+                if widgets::small_button(ui, &format!("Actualizar a v{}", release.version), busy.is_none()).clicked() {
+                    start = Some(release.clone());
+                }
+                ui.label(text(busy.unwrap_or("Hay una versión nueva").into(), theme::TEXT_SOFT));
+            }
+            UpdateState::Downloading(release, _) => {
+                ui.label(text(format!("Descargando v{}…", release.version), theme::TEXT_SOFT));
+                ui.spinner();
+            }
+            UpdateState::Ready(release, _) => {
+                install = widgets::small_button(ui, &format!("Instalar v{}", release.version), busy.is_none()).clicked();
+                ui.label(text(busy.unwrap_or("Descargada").into(), theme::TEXT_SOFT));
+            }
+            UpdateState::Failed(release, error) => {
+                if widgets::small_button(ui, "Reintentar", busy.is_none()).clicked() {
+                    start = Some(release.clone());
+                }
+                ui.label(text("No se pudo actualizar".into(), theme::WARN)).on_hover_text(error);
+            }
+        }
+        if let Some(release) = start {
+            self.updater.download(release, ui.ctx());
+        }
+        if install {
+            self.install_update(ui.ctx());
+        }
+    }
+
+    /// El clic en «Actualizar» vale para todo: al terminar la descarga se instala, salvo que en
+    /// el medio se haya conectado el teléfono o empezado a grabar.
+    fn poll_update(&mut self, ctx: &egui::Context) {
+        self.updater.check_once(ctx);
+        let downloading = matches!(self.updater.state, UpdateState::Downloading(..));
+        if let Some(error) = self.updater.poll() {
+            app_log(&error);
+        }
+        if downloading && matches!(self.updater.state, UpdateState::Ready(..)) && self.busy_for_update().is_none() {
+            self.install_update(ctx);
+        }
+    }
+
+    fn install_update(&mut self, ctx: &egui::Context) {
+        let UpdateState::Ready(release, path) = &self.updater.state else { return };
+        let (release, path) = (release.clone(), path.clone());
+        match update::install(&path) {
+            Ok(()) => {
+                self.updater.state = UpdateState::Quiet;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                app_log(&format!("instalar actualización: {error}"));
+                self.updater.state = UpdateState::Failed(release, error.to_string());
+            }
+        }
     }
 
     fn footer(&self, ui: &mut egui::Ui) {
@@ -1077,6 +1159,7 @@ impl CamdeskApp {
 impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
+        self.poll_update(ctx);
         self.refresh_recording_notice();
         let bar = |fill: egui::Color32| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(16, 0));
         egui::TopBottomPanel::top("cabecera")
