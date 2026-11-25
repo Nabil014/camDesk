@@ -91,6 +91,15 @@ struct CamdeskApp {
     vcam: Option<vcam::VirtualCamera>,
     preview: Option<egui::TextureHandle>,
     recording: Option<Recording>,
+    /// Lo que se está grabando, y qué monitor era al empezar.
+    screen: Option<egui::TextureHandle>,
+    recorded_monitor: String,
+    /// Último MP4 guardado, para abrir su ubicación. Se recuerda entre sesiones.
+    last_recording: Option<PathBuf>,
+    /// Barras de audio ya suavizadas, y el valor en dB que se está mostrando (sistema, micrófono).
+    meter_shown: [f32; 2],
+    meter_text: [f32; 2],
+    meter_text_at: f64,
     dirty: bool,
     /// Alto que pidieron los docks en el cuadro anterior.
     dock_height: f32,
@@ -139,6 +148,12 @@ impl CamdeskApp {
             vcam: None,
             preview: None,
             recording: None,
+            screen: None,
+            recorded_monitor: String::new(),
+            last_recording: None,
+            meter_shown: [0.0; 2],
+            meter_text: [0.0; 2],
+            meter_text_at: 0.0,
             dirty: false,
             dock_height: 360.0,
             updater: Updater::new(),
@@ -380,14 +395,14 @@ impl CamdeskApp {
             .response
             .labelled_by(name.id);
         ui.add_space(6.0);
-        let level = if self.system_audio { self.meter_level(true) } else { 0.0 };
-        self.dirty |= widgets::checkbox(ui, &mut self.system_audio, "Audio del sistema", Icon::Speaker, &level_db(level)).changed();
-        widgets::level_meter(ui, level);
+        let [system, mic] = self.meter_shown;
+        let [system_db, mic_db] = self.meter_text.map(level_db);
+        self.dirty |= widgets::checkbox(ui, &mut self.system_audio, "Audio del sistema", Icon::Speaker, &system_db).changed();
+        widgets::level_meter(ui, system);
         self.output_picker(ui);
         ui.add_space(6.0);
-        let level = if self.mic_on { self.meter_level(false) } else { 0.0 };
-        self.dirty |= widgets::checkbox(ui, &mut self.mic_on, "Micrófono", Icon::Mic, &level_db(level)).changed();
-        widgets::level_meter(ui, level);
+        self.dirty |= widgets::checkbox(ui, &mut self.mic_on, "Micrófono", Icon::Mic, &mic_db).changed();
+        widgets::level_meter(ui, mic);
         let mic_label = self
             .mics
             .iter()
@@ -486,6 +501,11 @@ impl CamdeskApp {
                 self.stop_recording();
             } else {
                 self.start_recording();
+            }
+        }
+        if self.recording.is_none() && self.last_recording.is_some() {
+            if widgets::wide_button(ui, "Mostrar en la carpeta").on_hover_text("La última grabación").clicked() {
+                self.show_last_recording();
             }
         }
         if let Some(error) = self.recording.as_ref().and_then(|rec| rec.error()) {
@@ -771,20 +791,39 @@ impl CamdeskApp {
         };
     }
 
-    /// La vista previa vive en un marco 16:9, el formato de la cámara virtual.
+    /// La vista previa vive en marcos 16:9, el formato de la cámara virtual. Al grabar se ve
+    /// la pantalla; si además hay imagen del teléfono, los dos van lado a lado y separados: la
+    /// cámara no se compone encima de la grabación.
     fn stage(&self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
         ui.allocate_rect(area, egui::Sense::hover());
-        let caption_height = 24.0;
-        let width = area.width().min(theme::PREVIEW_MAX_WIDTH).min((area.height() - caption_height) * 16.0 / 9.0).max(160.0);
+        let camera = self.preview.is_some() && (self.status.starts_with("En vivo") || self.status == "Desconectado");
+        let screen = self.recording.is_some() && self.screen.is_some();
+        let count = if camera && screen { 2 } else { 1 };
+        let (gap, caption_height) = (12.0, 24.0);
+        let share = (area.width() - gap * (count - 1) as f32) / count as f32;
+        let width = share.min(theme::PREVIEW_MAX_WIDTH).min((area.height() - caption_height) * 16.0 / 9.0).max(160.0);
         let size = egui::vec2(width, width * 9.0 / 16.0);
         let top = area.center().y - (size.y + caption_height) * 0.5;
-        let frame = egui::Rect::from_min_size(egui::pos2(area.center().x - size.x * 0.5, top), size);
+        let left = area.center().x - (size.x * count as f32 + gap * (count - 1) as f32) * 0.5;
+        let frame = |index: usize| egui::Rect::from_min_size(egui::pos2(left + index as f32 * (size.x + gap), top), size);
+        if count == 2 {
+            self.camera_frame(ui, frame(0), false);
+            self.screen_frame(ui, frame(1));
+        } else if screen {
+            self.screen_frame(ui, frame(0));
+        } else {
+            self.camera_frame(ui, frame(0), self.recording.is_some());
+        }
+    }
+
+    /// La imagen del teléfono, o por qué no hay. `rec` marca el tiempo cuando es el único marco.
+    fn camera_frame(&self, ui: &egui::Ui, frame: egui::Rect, rec: bool) {
         let painter = ui.painter();
         painter.rect_filled(frame, 10.0, theme::VIEWPORT);
         let live = self.status.starts_with("En vivo");
         let frozen = self.status == "Desconectado" && self.preview.is_some();
-        let painted = (live || frozen) && self.paint_frame(ui, frame);
+        let painted = (live || frozen) && self.preview.as_ref().is_some_and(|texture| paint_picture(ui, frame, texture));
         if !painted {
             let wrap = (frame.width() - 48.0).min(440.0);
             let mut job = egui::text::LayoutJob::simple(self.empty_copy(), theme::body(14.0), theme::MUTED, wrap);
@@ -796,41 +835,52 @@ impl CamdeskApp {
             // Centrado: el origen del bloque de texto es su eje.
             painter.galley(egui::pos2(frame.center().x, top + 48.0), galley, theme::MUTED);
         }
-        painter.rect_stroke(frame, 10.0, egui::Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Outside);
         let inset = egui::vec2(12.0, 12.0);
         if painted && live {
             widgets::badge(painter, frame.left_top() + inset, egui::Align2::LEFT_TOP, theme::LIVE, "EN VIVO", theme::LIVE_TEXT);
         }
-        if let Some(recording) = &self.recording {
-            let text = format!("REC {}", format_elapsed(recording.elapsed()));
-            let anchor = egui::pos2(frame.right() - inset.x, frame.top() + inset.y);
-            widgets::badge(painter, anchor, egui::Align2::RIGHT_TOP, theme::REC, &text, theme::REC_TEXT);
+        if rec {
+            self.rec_badge(painter, frame);
         }
         if painted && frozen {
             widgets::badge(painter, frame.right_bottom() - inset, egui::Align2::RIGHT_BOTTOM, theme::WARN, "Último cuadro", theme::WARN);
         }
-        painter.text(
-            egui::pos2(frame.center().x, frame.bottom() + 14.0),
-            egui::Align2::CENTER_CENTER,
-            self.caption(),
-            theme::mono(12.0),
-            theme::MUTED,
-        );
+        finish_frame(painter, frame, self.caption());
     }
 
-    fn paint_frame(&self, ui: &egui::Ui, frame: egui::Rect) -> bool {
-        let Some(texture) = &self.preview else { return false };
-        let size = texture.size_vec2();
-        if size.x <= 0.0 || size.y <= 0.0 {
-            return false;
+    fn screen_frame(&self, ui: &egui::Ui, frame: egui::Rect) {
+        let painter = ui.painter();
+        painter.rect_filled(frame, 10.0, theme::VIEWPORT);
+        if let Some(texture) = &self.screen {
+            paint_picture(ui, frame, texture);
         }
-        let scale = (frame.width() / size.x).min(frame.height() / size.y);
-        let fitted = egui::Rect::from_center_size(frame.center(), size * scale);
-        let radius = if fitted.width() >= frame.width() - 1.0 { 10 } else { 0 };
-        egui::Image::from_texture(texture)
-            .corner_radius(egui::CornerRadius::same(radius))
-            .paint_at(ui, fitted);
-        true
+        let inset = egui::vec2(12.0, 12.0);
+        widgets::badge(painter, frame.left_top() + inset, egui::Align2::LEFT_TOP, theme::REC, "PANTALLA", theme::TEXT);
+        self.rec_badge(painter, frame);
+        finish_frame(painter, frame, format!("Se graba {}", self.recorded_monitor));
+    }
+
+    fn rec_badge(&self, painter: &egui::Painter, frame: egui::Rect) {
+        let Some(recording) = &self.recording else { return };
+        let text = format!("REC {}", format_elapsed(recording.elapsed()));
+        let anchor = egui::pos2(frame.right() - 12.0, frame.top() + 12.0);
+        widgets::badge(painter, anchor, egui::Align2::RIGHT_TOP, theme::REC, &text, theme::REC_TEXT);
+    }
+
+    /// Sube el último cuadro de la pantalla que dejó `record`. Al terminar de grabar se descarta.
+    fn poll_screen(&mut self, ctx: &egui::Context) {
+        let Some(recording) = &self.recording else {
+            self.screen = None;
+            return;
+        };
+        let Some(preview) = recording.take_preview() else { return };
+        let size = [preview.width as usize, preview.height as usize];
+        let image = egui::ColorImage::from_rgba_unmultiplied(size, &preview.rgba);
+        if let Some(texture) = self.screen.as_mut() {
+            texture.set(image, egui::TextureOptions::LINEAR);
+        } else {
+            self.screen = Some(ctx.load_texture("pantalla", image, egui::TextureOptions::LINEAR));
+        }
     }
 
     fn caption(&self) -> String {
@@ -869,7 +919,7 @@ impl CamdeskApp {
 
     fn empty_copy(&self) -> String {
         if self.recording.is_some() && self.preview.is_none() {
-            return "Grabando sin cámara. La vista previa sigue vacía.".into();
+            return "Grabando. Esperando la imagen de la pantalla.".into();
         }
         if self.retrying() || self.status == "Conectando" {
             return "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.".into();
@@ -892,10 +942,23 @@ impl CamdeskApp {
         pick_monitor(&self.monitors, self.monitor.as_ref(), self.monitor_size)
     }
 
-    fn meter_level(&self, system: bool) -> f32 {
-        let Some(recording) = &self.recording else { return 0.0 };
-        let (system_level, mic_level) = recording.levels();
-        if system { system_level } else { mic_level }
+    /// Las barras siguen al nivel medido cuadro a cuadro; el número cambia más lento para leerse.
+    fn poll_meters(&mut self, ctx: &egui::Context) {
+        let Some(recording) = &self.recording else {
+            self.meter_shown = [0.0; 2];
+            self.meter_text = [0.0; 2];
+            return;
+        };
+        let (system, mic) = recording.levels();
+        let target = [if self.system_audio { system } else { 0.0 }, if self.mic_on { mic } else { 0.0 }];
+        let (elapsed, now) = ctx.input(|input| (input.unstable_dt.min(0.1), input.time));
+        for (shown, target) in self.meter_shown.iter_mut().zip(target) {
+            *shown = ease(*shown, target, elapsed);
+        }
+        if now - self.meter_text_at >= 0.2 {
+            self.meter_text = target;
+            self.meter_text_at = now;
+        }
     }
 
     fn monitor_label(&self) -> String {
@@ -934,6 +997,9 @@ impl CamdeskApp {
             output: output.clone(),
         }) {
             Ok(recording) => {
+                // La lista se puede cambiar mientras graba: se guarda cuál se está grabando.
+                self.recorded_monitor = self.monitor_label();
+                self.screen = None;
                 self.recording = Some(recording);
                 self.notice = if self.status.starts_with("En vivo") {
                     "Grabando 00:00\nGraba el monitor. No usa el teléfono ni los efectos.".into()
@@ -948,9 +1014,24 @@ impl CamdeskApp {
     fn stop_recording(&mut self) {
         if let Some(recording) = self.recording.take() {
             match recording.stop() {
-                Ok(path) => self.notice = format!("Grabación guardada\n{}", path.display()),
+                Ok(path) => {
+                    self.notice = format!("Grabación guardada\n{}", path.display());
+                    self.last_recording = Some(path);
+                    self.dirty = true;
+                }
                 Err(error) => self.notice = error.message,
             }
+        }
+    }
+
+    fn show_last_recording(&mut self) {
+        let Some(path) = self.last_recording.clone() else { return };
+        if !path.is_file() {
+            self.notice = "La grabación ya no está\nSe abre la carpeta donde se guardó.".into();
+        }
+        if let Err(error) = reveal(&path) {
+            self.notice = format!("No se pudo abrir la carpeta\n{error}");
+            app_log(&self.notice);
         }
     }
 
@@ -989,6 +1070,9 @@ impl CamdeskApp {
                 "blur" => self.blur_strength = value.trim().parse().unwrap_or(0.5),
                 "system_audio" => self.system_audio = value.trim() != "0",
                 "mic" => self.mic_on = value.trim() != "0",
+                "last_recording" => {
+                    self.last_recording = Some(value.trim()).filter(|path| !path.is_empty()).map(PathBuf::from);
+                }
                 "system_device" => {
                     self.system_device = Some(value.trim()).filter(|id| !id.is_empty()).map(|id| OutputId(id.to_string()));
                 }
@@ -1017,7 +1101,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\nlast_recording={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -1043,6 +1127,7 @@ impl CamdeskApp {
             self.monitor_size.and(self.monitor.as_ref()).map_or("", |id| id.0.as_str()),
             self.system_device.as_ref().map_or("", |id| id.0.as_str()),
             self.system_device_name,
+            self.last_recording.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
         );
         let _ = std::fs::write(path, text);
     }
@@ -1160,6 +1245,8 @@ impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll(ctx);
         self.poll_update(ctx);
+        self.poll_screen(ctx);
+        self.poll_meters(ctx);
         self.refresh_recording_notice();
         let bar = |fill: egui::Color32| egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(16, 0));
         egui::TopBottomPanel::top("cabecera")
@@ -1192,10 +1279,11 @@ impl eframe::App for CamdeskApp {
             self.dirty = false;
         }
         // Los cuadros piden su propio repintado desde el hilo de video. Esto mueve el pie y el epígrafe.
-        if self.connected {
+        if self.recording.is_some() {
+            // Las barras de audio se mueven suave solo si se redibujan seguido.
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.connected {
             ctx.request_repaint_after(Duration::from_millis(100));
-        } else if self.recording.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
@@ -1212,6 +1300,30 @@ fn signed(value: f32) -> String {
     }
 }
 
+/// Sube rápido y baja suave, sin depender de cuánto tardó el cuadro.
+fn ease(shown: f32, target: f32, seconds: f32) -> f32 {
+    let constant = if target > shown { 0.03 } else { 0.08 };
+    let next = shown + (target - shown) * (1.0 - (-seconds / constant).exp());
+    if (next - target).abs() < 0.002 {
+        target
+    } else {
+        next
+    }
+}
+
+/// Abre el Explorador con el archivo seleccionado; si ya no está, la carpeta donde estaba.
+fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let mut explorer = std::process::Command::new("explorer.exe");
+    match path.parent() {
+        // `raw_arg`: el Explorador quiere las comillas alrededor de la ruta, no de todo el argumento.
+        _ if path.is_file() => explorer.raw_arg(format!("/select,\"{}\"", path.display())),
+        Some(folder) => explorer.arg(folder),
+        None => &mut explorer,
+    };
+    explorer.spawn().map(|_| ())
+}
+
 /// `record` entrega el pico de 0 a 1, lineal entre −48 dB y 0 dB.
 fn level_db(level: f32) -> String {
     if level <= 0.0 {
@@ -1223,6 +1335,31 @@ fn level_db(level: f32) -> String {
     } else {
         format!("−{below:.0} dB")
     }
+}
+
+/// Pinta la textura entera y centrada dentro del marco.
+fn paint_picture(ui: &egui::Ui, frame: egui::Rect, texture: &egui::TextureHandle) -> bool {
+    let size = texture.size_vec2();
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return false;
+    }
+    let scale = (frame.width() / size.x).min(frame.height() / size.y);
+    let fitted = egui::Rect::from_center_size(frame.center(), size * scale);
+    let radius = if fitted.width() >= frame.width() - 1.0 { 10 } else { 0 };
+    egui::Image::from_texture(texture)
+        .corner_radius(egui::CornerRadius::same(radius))
+        .paint_at(ui, fitted);
+    true
+}
+
+/// Borde del marco y epígrafe debajo, recortado al ancho del marco.
+fn finish_frame(painter: &egui::Painter, frame: egui::Rect, caption: String) {
+    painter.rect_stroke(frame, 10.0, egui::Stroke::new(1.0_f32, theme::BORDER), egui::StrokeKind::Outside);
+    let mut job = egui::text::LayoutJob::simple_singleline(caption, theme::mono(12.0), theme::MUTED);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(frame.width());
+    job.halign = egui::Align::Center;
+    let galley = painter.layout_job(job);
+    painter.galley(egui::pos2(frame.center().x, frame.bottom() + 7.0), galley, theme::MUTED);
 }
 
 fn note(warning: &mut Option<String>, text: String) {
@@ -1371,6 +1508,16 @@ fn config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_barra_se_acerca_al_nivel_sin_saltar() {
+        let down = ease(0.8, 0.0, 1.0 / 60.0);
+        assert!((0.6..0.8).contains(&down), "{down}");
+        let up = ease(0.0, 0.8, 1.0 / 60.0);
+        assert!(up > 0.3 && up < 0.8, "{up}");
+        assert_eq!((0..120).fold(0.8, |shown, _| ease(shown, 0.0, 1.0 / 60.0)), 0.0);
+        assert_eq!(ease(0.5, 0.5, 0.016), 0.5);
+    }
 
     fn monitor(id: &str, width: u32, height: u32, primary: bool) -> record::MonitorInfo {
         record::MonitorInfo { id: MonitorId(id.into()), name: format!("{id} · Panel"), width, height, primary }

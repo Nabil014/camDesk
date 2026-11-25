@@ -6,7 +6,7 @@ mod mux;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,11 @@ use crate::mux::{Mux, probe_video_encoder};
 const FPS: u64 = 30;
 const RATE: usize = 48_000;
 const SAMPLES_PER_TICK: usize = RATE / FPS as usize;
+/// La vista previa no necesita más que esto, y así no frena la grabación.
+const PREVIEW_WIDTH: u32 = 960;
+const PREVIEW_EVERY: u64 = 3;
+/// Cuánto cae un medidor por segundo. La barra entera son 48 dB: medio son 24 dB por segundo.
+const METER_FALL: f32 = 0.5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorId(pub String);
@@ -208,7 +213,18 @@ impl Levels {
     }
 }
 
+/// Cuadro reducido de lo que se está grabando, en RGBA, para mostrarlo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScreenPreview {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+type PreviewSlot = Arc<Mutex<Option<ScreenPreview>>>;
+
 pub struct Recording {
+    preview: PreviewSlot,
     stop: Arc<AtomicBool>,
     started: Instant,
     join: Option<JoinHandle<Result<(), String>>>,
@@ -244,6 +260,8 @@ impl Recording {
         let stop_thread = stop.clone();
         let failure_thread = failure.clone();
         let levels_thread = levels.clone();
+        let preview = PreviewSlot::default();
+        let preview_thread = preview.clone();
         let system_audio = cfg.system_audio;
         let system_device = cfg.system_device.map(|id| id.0);
         let mic = cfg.mic.clone();
@@ -252,7 +270,8 @@ impl Recording {
             .name("camdesk-record".into())
             .spawn(move || {
                 let sound = Sound { system: system_audio, system_device, mic: mic.map(|id| id.0) };
-                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, sound, levels_thread) {
+                let shared = Shared { levels: levels_thread, preview: preview_thread };
+                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, sound, shared) {
                     *failure_thread.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error.clone());
                     return Err(error);
                 }
@@ -260,6 +279,7 @@ impl Recording {
             })
             .map_err(|error| err(error.to_string()))?;
         Ok(Self {
+            preview,
             stop,
             started: Instant::now(),
             join: Some(join),
@@ -277,6 +297,11 @@ impl Recording {
     /// Nivel reciente de 0 a 1: audio del sistema y micrófono. 0 es silencio.
     pub fn levels(&self) -> (f32, f32) {
         self.levels.pair()
+    }
+
+    /// El último cuadro de la pantalla desde la llamada anterior, unas 10 veces por segundo.
+    pub fn take_preview(&self) -> Option<ScreenPreview> {
+        self.preview.lock().unwrap_or_else(|poison| poison.into_inner()).take()
     }
 
     pub fn encoder(&self) -> &str {
@@ -357,6 +382,12 @@ struct Sound {
     mic: Option<String>,
 }
 
+/// Lo que el hilo de grabación deja a la vista de quien lo arrancó.
+struct Shared {
+    levels: Arc<Levels>,
+    preview: PreviewSlot,
+}
+
 fn run(
     mut mux: Mux,
     stop: Arc<AtomicBool>,
@@ -364,8 +395,9 @@ fn run(
     width: u32,
     height: u32,
     sound: Sound,
-    levels: Arc<Levels>,
+    shared: Shared,
 ) -> Result<(), String> {
+    let Shared { levels, preview } = shared;
     let index: usize = monitor_id.parse().map_err(|_| "el monitor no tiene índice".to_string())?;
     // `from_index` toma la posición en la enumeración, que no tiene por qué ser el número de pantalla.
     let monitor = Monitor::enumerate()
@@ -396,6 +428,18 @@ fn run(
         .spawn(move || audio_loop(audio_stop, audio_slot, sound, levels))
         .map_err(|error| error.to_string())?;
 
+    // La vista previa se reduce en otro hilo: si se atrasa, se saltea; la grabación no espera.
+    let (to_preview, previews) = mpsc::sync_channel::<Vec<u8>>(1);
+    std::thread::Builder::new()
+        .name("camdesk-preview".into())
+        .spawn(move || {
+            for frame in previews {
+                let small = shrink_to_rgba(&frame, width, height, PREVIEW_WIDTH);
+                *preview.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(small);
+            }
+        })
+        .map_err(|error| error.to_string())?;
+
     let freq = qpc_freq();
     let clock = qpc_now();
     let mut frame_index = 0u64;
@@ -420,6 +464,10 @@ fn run(
             canvas.fill(0);
         }
         mux.write_video(&canvas)?;
+        // Sale del mismo lienzo que va al MP4: se ve lo que se graba.
+        if held.is_some() && frame_index % PREVIEW_EVERY == 0 {
+            let _ = to_preview.try_send(canvas.clone());
+        }
         pull_audio(&audio, &mut pending);
         let usable = pending.len() - pending.len() % frame_samples;
         if usable > 0 {
@@ -482,6 +530,35 @@ fn take_add(queue: &mut VecDeque<f32>, dest: &mut [f32]) {
     }
 }
 
+/// Reduce un BGRA a `max_width` como mucho y lo pasa a RGBA opaco. Promedia cuatro muestras
+/// por píxel: tomando una sola, el texto de la pantalla queda ilegible.
+fn shrink_to_rgba(bgra: &[u8], width: u32, height: u32, max_width: u32) -> ScreenPreview {
+    let (sw, sh) = (width as usize, height as usize);
+    let dw = width.min(max_width).max(1) as usize;
+    let dh = (sh * dw / sw.max(1)).max(1);
+    let mut rgba = vec![0u8; dw * dh * 4];
+    if sw == 0 || sh == 0 || bgra.len() < sw * sh * 4 {
+        return ScreenPreview { width: dw as u32, height: dh as u32, rgba };
+    }
+    for (y, row) in rgba.chunks_exact_mut(dw * 4).enumerate() {
+        let rows = [(4 * y + 1) * sh / (4 * dh), (4 * y + 3) * sh / (4 * dh)];
+        for (x, out) in row.chunks_exact_mut(4).enumerate() {
+            let columns = [(4 * x + 1) * sw / (4 * dw), (4 * x + 3) * sw / (4 * dw)];
+            let mut sum = [0u32; 3];
+            for sy in rows {
+                for sx in columns {
+                    let from = (sy * sw + sx) * 4;
+                    for (channel, total) in sum.iter_mut().enumerate() {
+                        *total += u32::from(bgra[from + channel]);
+                    }
+                }
+            }
+            out.copy_from_slice(&[(sum[2] / 4) as u8, (sum[1] / 4) as u8, (sum[0] / 4) as u8, 255]);
+        }
+    }
+    ScreenPreview { width: dw as u32, height: dh as u32, rgba }
+}
+
 fn fit(src: &[u8], sw: u32, sh: u32, dst: &mut [u8], dw: u32, dh: u32) {
     if sw == 0 || sh == 0 {
         dst.fill(0);
@@ -519,6 +596,8 @@ fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, sound: Sound
     let _ = initialize_mta();
     // Una salida elegida que se desconecta no se busca en cada vuelta: enumerar cuesta.
     let mut retry_at = Instant::now();
+    let mut system_meter = Meter::new();
+    let mut mic_meter = Meter::new();
     let mut loopback: Option<OpenCapture> = None;
     let mut microphone: Option<OpenCapture> = None;
     let mut scratch = vec![0u8; 16_384];
@@ -549,34 +628,34 @@ fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, sound: Sound
         if let Some(source) = loopback.as_ref() {
             match read_floats(&source.capture, &mut scratch) {
                 Ok(samples) if !samples.is_empty() => {
-                    note_level(&levels.system, &samples);
+                    system_meter.feed(&levels.system, &samples);
                     slot.lock().unwrap_or_else(|poison| poison.into_inner()).loopback.extend(samples);
                     read_any = true;
                 }
-                Ok(_) => note_level(&levels.system, &[]),
+                Ok(_) => system_meter.feed(&levels.system, &[]),
                 Err(_) => {
-                    note_level(&levels.system, &[]);
+                    system_meter.feed(&levels.system, &[]);
                     loopback = None;
                 }
             }
         } else if system_audio {
-            note_level(&levels.system, &[]);
+            system_meter.feed(&levels.system, &[]);
         }
         if let Some(source) = microphone.as_ref() {
             match read_floats(&source.capture, &mut scratch) {
                 Ok(samples) if !samples.is_empty() => {
-                    note_level(&levels.mic, &samples);
+                    mic_meter.feed(&levels.mic, &samples);
                     slot.lock().unwrap_or_else(|poison| poison.into_inner()).mic.extend(samples);
                     read_any = true;
                 }
-                Ok(_) => note_level(&levels.mic, &[]),
+                Ok(_) => mic_meter.feed(&levels.mic, &[]),
                 Err(_) => {
-                    note_level(&levels.mic, &[]);
+                    mic_meter.feed(&levels.mic, &[]);
                     microphone = None;
                 }
             }
         } else if mic.is_some() {
-            note_level(&levels.mic, &[]);
+            mic_meter.feed(&levels.mic, &[]);
         }
         if !read_any {
             std::thread::sleep(Duration::from_millis(5));
@@ -590,20 +669,38 @@ fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, sound: Sound
     }
 }
 
-fn note_level(slot: &AtomicU32, samples: &[f32]) {
-    let mut peak = 0f32;
-    for sample in samples {
-        peak = peak.max(sample.abs());
+/// Nivel de una pista: sube al instante y baja a ritmo constante en el tiempo, no por vuelta
+/// del bucle, que no tiene un ritmo fijo.
+struct Meter {
+    value: f32,
+    at: Instant,
+}
+
+impl Meter {
+    fn new() -> Self {
+        Self { value: 0.0, at: Instant::now() }
     }
-    let target = if peak <= 1e-7 {
+
+    fn feed(&mut self, slot: &AtomicU32, samples: &[f32]) {
+        let now = Instant::now();
+        self.value = envelope(self.value, peak_level(samples), now.duration_since(self.at).as_secs_f32());
+        self.at = now;
+        slot.store(self.value.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Pico de 0 a 1, lineal en decibeles entre −48 dB y 0 dB.
+fn peak_level(samples: &[f32]) -> f32 {
+    let peak = samples.iter().fold(0f32, |peak, sample| peak.max(sample.abs()));
+    if peak <= 1e-7 {
         0.0
     } else {
-        let db = 20.0 * peak.log10();
-        ((db + 48.0) / 48.0).clamp(0.0, 1.0)
-    };
-    let current = f32::from_bits(slot.load(Ordering::Relaxed));
-    let next = if target >= current { target } else { current * 0.85 };
-    slot.store(next.to_bits(), Ordering::Relaxed);
+        ((20.0 * peak.log10() + 48.0) / 48.0).clamp(0.0, 1.0)
+    }
+}
+
+fn envelope(previous: f32, target: f32, seconds: f32) -> f32 {
+    target.max(previous - METER_FALL * seconds).max(0.0)
 }
 
 fn open_loopback(chosen: Option<&str>) -> Result<OpenCapture, wasapi::WasapiError> {
@@ -729,6 +826,8 @@ fn graba_un_segundo() {
     .expect("la grabación tiene que arrancar");
     let encoder = recording.encoder().to_string();
     std::thread::sleep(Duration::from_millis(1200));
+    let preview = recording.take_preview().expect("tiene que haber vista previa");
+    assert!(preview.width <= PREVIEW_WIDTH && preview.rgba.len() == (preview.width * preview.height * 4) as usize);
     recording.stop().expect("la grabación tiene que cerrar");
     let bytes = std::fs::read(&output).expect("el MP4 tiene que existir");
     assert!(bytes.len() > 1024, "mp4 corto: {}", bytes.len());
@@ -756,6 +855,36 @@ fn graba_un_segundo() {
     assert!(audio_s > 0.8 && video_s > 0.8, "duración video={video_s} audio={audio_s}");
     assert!((video_s - audio_s).abs() < 0.5, "el video no acompaña al audio: {video_s} vs {audio_s}");
     let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn el_medidor_sube_al_instante_y_baja_segun_el_tiempo() {
+    assert_eq!(envelope(0.1, 0.8, 0.001), 0.8);
+    // En 16 ms baja menos del 1 %, sin importar cuántas vueltas dé el bucle.
+    let once = envelope(0.8, 0.0, 0.016);
+    let in_pieces = (0..4).fold(0.8, |value, _| envelope(value, 0.0, 0.004));
+    assert!((0.8 - once) < 0.01 && (once - in_pieces).abs() < 1e-5, "{once} {in_pieces}");
+    assert_eq!(envelope(0.2, 0.0, 10.0), 0.0);
+    assert_eq!(peak_level(&[]), 0.0);
+    assert_eq!(peak_level(&[0.0, -1.0]), 1.0);
+}
+
+#[test]
+fn la_vista_previa_se_reduce_y_queda_en_rgba() {
+    // Mitad izquierda azul, mitad derecha roja, en BGRA.
+    let mut bgra = Vec::new();
+    for _ in 0..8 {
+        for x in 0..16 {
+            bgra.extend_from_slice(if x < 8 { &[255, 0, 0, 0] } else { &[0, 0, 255, 0] });
+        }
+    }
+    let small = shrink_to_rgba(&bgra, 16, 8, 4);
+    assert_eq!((small.width, small.height, small.rgba.len()), (4, 2, 4 * 2 * 4));
+    assert_eq!(&small.rgba[0..4], &[0, 0, 255, 255], "izquierda azul");
+    assert_eq!(&small.rgba[12..16], &[255, 0, 0, 255], "derecha roja");
+    // Una pantalla más chica que el máximo no se agranda.
+    let same = shrink_to_rgba(&bgra, 16, 8, 960);
+    assert_eq!((same.width, same.height), (16, 8));
 }
 
 #[test]

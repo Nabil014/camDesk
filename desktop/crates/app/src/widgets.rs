@@ -206,6 +206,21 @@ pub fn small_button(ui: &mut Ui, text: &str, enabled: bool) -> Response {
     .inner
 }
 
+/// Botón secundario de todo el ancho del dock.
+pub fn wide_button(ui: &mut Ui, text: &str) -> Response {
+    // Justificado: llena el ancho y el texto queda al centro.
+    ui.vertical_centered_justified(|ui| {
+        ui.add(
+            egui::Button::new(egui::RichText::new(text).font(body(12.0)).color(theme::TEXT_SOFT))
+                .fill(Color32::TRANSPARENT)
+                .stroke(Stroke::new(1.0_f32, theme::GHOST_BORDER))
+                .corner_radius(8.0)
+                .min_size(vec2(0.0, 32.0)),
+        )
+    })
+    .inner
+}
+
 /// Botón chico y sin relleno, como «Restablecer».
 pub fn ghost_button(ui: &mut Ui, text: &str) -> Response {
     ui.scope(|ui| {

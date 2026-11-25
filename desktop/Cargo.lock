@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "camdesk"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "decode",
  "ed25519-dalek",

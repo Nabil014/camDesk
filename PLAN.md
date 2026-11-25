@@ -165,7 +165,8 @@ pub fn default_output() -> std::path::PathBuf; // Videos\Camdesk\grabacion-YYYYM
 pub fn video_encoder_name() -> Result<String, RecordError>; // abre y cierra NVENC, AMF, Quick Sync o h264_mf
 pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub system_device: Option<OutputId>, pub mic: Option<MicId>, pub output: std::path::PathBuf }
 // system_device None = la predeterminada. start() falla si la elegida no está.
-pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); levels() -> (f32, f32); error(); stop() -> Result<PathBuf>
+pub struct ScreenPreview { pub width: u32, pub height: u32, pub rgba: Vec<u8> } // 960 de ancho como mucho
+pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); levels() -> (f32, f32); take_preview() -> Option<ScreenPreview>; error(); stop() -> Result<PathBuf>
 ```
 
 `decode` señala con `DecodeError` cuando necesita un keyframe; `app` llama a `Session::request_keyframe()`.
@@ -292,7 +293,7 @@ El paso 3 cablea `app`. Conectar crea el decoder, el archivo mapeado y llama a `
 - Pantalla: `windows-capture` (Windows.Graphics.Capture), monitor elegido en la UI, resolución nativa del monitor.
 - **30 fps constantes.** WGC solo entrega frames cuando cambia la pantalla: si no llega uno a tiempo se repite el último. Si el encode se atrasa, se descarta el frame de pantalla más viejo.
 - Audio del sistema: WASAPI loopback de la salida elegida. Por defecto, «Salida predeterminada». **El loopback no entrega paquetes en silencio**: el hueco se rellena con ceros según el reloj, si no el audio se corre.
-- Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes. Mientras se graba, la UI muestra el nivel reciente de cada pista, de silencio a 0 dB; al abrir la ventana esas barras quedan vacías y no se abre WASAPI.
+- Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes. Mientras se graba, la UI muestra el nivel reciente de cada pista, de silencio a 0 dB. El nivel sube al instante y cae 24 dB por segundo; la barra se dibuja suavizada a unos 60 cuadros por segundo y el número en dB cambia cada 200 ms; al abrir la ventana esas barras quedan vacías y no se abre WASAPI.
 - Las dos pistas pasan a 48 kHz estéreo float, se suman y se recortan. Cada una se puede apagar.
 - Reloj común: `QueryPerformanceCounter`. Cada pista se alinea a ese reloj; si se corre más de 20 ms, se insertan o descartan muestras.
 - Con «Salida predeterminada», si cambia el dispositivo por defecto en medio de la grabación, se reabre y el hueco va en silencio. Una salida elegida a mano no sigue a la predeterminada: si se desconecta, esa pista queda en silencio y se vuelve a buscar cada 500 ms. La grabación no se corta. Si al pulsar Grabar la elegida no está, no se graba y el aviso lo dice.
@@ -300,7 +301,7 @@ El paso 3 cablea `app`. Conectar crea el decoder, el archivo mapeado y llama a `
 - Los monitores se listan numerados, con su tamaño y «(principal)» en el principal. Se recuerdan por número y tamaño (`monitor_id`, `monitor`).
 - Salida: carpeta Videos del usuario (`FOLDERID_Videos`) + `Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4`.
 - **MP4 fragmentado** (`frag_keyframe+empty_moov+default_base_moof`) para que un cuelgue no deje el archivo ilegible.
-- Encoder de video, en este orden: NVENC, AMF, Quick Sync, `h264_mf`. `h264_mf` ya cae al encoder de software de Windows; no se usa `libx264`. Mientras se graba, el pie muestra ese encoder y «30 fps», al lado del tiempo REC. Si no hay imagen del teléfono, la vista previa dice que sigue vacía y el epígrafe dice que cellCam permanece en negro. Al detener, el aviso dice «Grabación guardada» y, al lado, la ruta del MP4. Mientras se graba sin teléfono, el aviso dice «Grabando sin cámara» y que la grabación es otro trabajo. Con el teléfono en vivo, dice «Grabando» con el tiempo y que graba el monitor.
+- Encoder de video, en este orden: NVENC, AMF, Quick Sync, `h264_mf`. `h264_mf` ya cae al encoder de software de Windows; no se usa `libx264`. Mientras se graba, el pie muestra ese encoder y «30 fps», al lado del tiempo REC. Mientras se graba, la vista previa muestra la pantalla grabada, unas 10 veces por segundo, con las marcas PANTALLA y REC y el monitor en el epígrafe. Sale del mismo lienzo que va al MP4. Si además hay imagen del teléfono, la cámara y la pantalla van en dos marcos lado a lado: la cámara no se compone encima de la grabación. Antes de pulsar Grabar no se captura la pantalla. Después de guardar, debajo de «Grabar» queda «Mostrar en la carpeta», que abre el Explorador con el último MP4 seleccionado; la ruta se recuerda entre sesiones (`last_recording`). Si se graba el monitor donde está Camdesk, la vista previa se ve repetida dentro de sí misma. Al detener, el aviso dice «Grabación guardada» y, al lado, la ruta del MP4. Mientras se graba sin teléfono, el aviso dice «Grabando sin cámara» y que la grabación es otro trabajo. Con el teléfono en vivo, dice «Grabando» con el tiempo y que graba el monitor.
 - Audio AAC.
 
 ## FFmpeg
