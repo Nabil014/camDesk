@@ -168,6 +168,9 @@ impl CamdeskApp {
             decoder.reset();
         }
         self.status = "Desconectado".into();
+        if self.preview.is_some() && self.recording.is_none() {
+            self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
+        }
     }
 
     fn effects(&mut self, ui: &mut egui::Ui) {
@@ -344,7 +347,9 @@ impl CamdeskApp {
                 self.session = Some(session);
                 self.events = Some(events);
                 self.status = "Conectando".into();
-                self.notice = warning.unwrap_or_default();
+                self.notice = warning.unwrap_or_else(|| {
+                    "Conectando\nUSB si el teléfono está autorizado. Si no, la IP.".into()
+                });
             }
             Err(error) => self.notice = error.to_string(),
         }
@@ -407,7 +412,12 @@ impl CamdeskApp {
                                 Camera::Back => "El teléfono se quedó en la cámara trasera".into(),
                                 Camera::Front => "El teléfono se quedó en la cámara frontal".into(),
                             };
+                        } else if self.notice.starts_with("Conectando") {
+                            self.notice.clear();
                         }
+                    }
+                    if matches!(status, Status::Desconectado) && self.preview.is_some() && self.recording.is_none() {
+                        self.notice = "Último cuadro\nSi se corta la red, la cámara virtual no pasa a negro.".into();
                     }
                     self.status = status_text(status);
                 }
@@ -550,9 +560,16 @@ impl CamdeskApp {
             if self.recording.is_some() {
                 return "cellCam permanece en negro".into();
             }
-            return "Zoom recibe cellCam a 1920×1080".into();
+            return match self.status.as_str() {
+                "Conectando" | "Teléfono no autorizado" => "Reintento cada 2 segundos".into(),
+                "Versión incompatible" => "No hay reintento útil".into(),
+                _ => "Zoom recibe cellCam a 1920×1080".into(),
+            };
         };
-        if !self.status.starts_with("En vivo") && self.status != "Desconectado" {
+        if self.status == "Desconectado" {
+            return "Zoom se quedó en esta imagen".into();
+        }
+        if !self.status.starts_with("En vivo") {
             return "Zoom recibe cellCam a 1920×1080".into();
         }
         let size = texture.size_vec2();
@@ -765,7 +782,12 @@ impl eframe::App for CamdeskApp {
             .show(ctx, |ui| {
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new("cellCam").color(MUTED));
-                    ui.label(egui::RichText::new(&self.status).color(status_color(&self.status)));
+                    let status_tone = if self.status == "Desconectado" && self.preview.is_some() {
+                        WARN
+                    } else {
+                        status_color(&self.status)
+                    };
+                    ui.label(egui::RichText::new(&self.status).color(status_tone));
                     if let Some(recording) = &self.recording {
                         let elapsed = format_elapsed(recording.elapsed());
                         let encoder = encoder_label(recording.encoder());
@@ -979,6 +1001,8 @@ fn notice_color(text: &str) -> egui::Color32 {
     let lower = text.to_lowercase();
     if lower.contains("incompatible") || lower.contains("error") || lower.contains("no hay") {
         DANGER
+    } else if lower.contains("último cuadro") || lower.contains("ultimo cuadro") {
+        WARN
     } else if lower.contains("sin cámara") {
         INFO
     } else if lower.contains("guardad") || lower.contains("grabando") {
@@ -1089,7 +1113,7 @@ fn monitor_text(item: &record::MonitorInfo) -> String {
 fn status_text(status: Status) -> String {
     match status {
         Status::Conectando => "Conectando".into(),
-        Status::EnVivo { width, height, .. } => format!("En vivo {width}×{height}"),
+        Status::EnVivo { width, height, .. } => format!("En vivo · {width}×{height}"),
         Status::Desconectado => "Desconectado".into(),
         Status::Ocupado => "Ocupado".into(),
         Status::NoAutorizado => "Teléfono no autorizado".into(),
