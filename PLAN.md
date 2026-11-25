@@ -7,7 +7,7 @@ Este archivo es el diseño. Las reglas para no pisarse entre agentes están en [
 ## Qué no se construye
 
 - No hay app Android nueva. cellCam vive en `d:\DESARROLLO\Proyectos\cellCam` y **no se modifica**.
-- No hay protocolo nuevo. Manda el `PROTOCOL.md` de cellCam, versión 1 (`d:\DESARROLLO\Proyectos\cellCam\PROTOCOL.md`). La copia de lectura para este repo es [docs/PROTOCOL-v1.md](docs/PROTOCOL-v1.md) (**pendiente: copiarla desde cellCam**; no se edita aquí). Si el código de cellCam y ese archivo discrepan, se corrige el código de cellCam en su propio repo, no se adapta Camdesk a un desvío.
+- No hay protocolo nuevo. Manda el `PROTOCOL.md` de cellCam, versión 1 (`d:\DESARROLLO\Proyectos\cellCam\PROTOCOL.md`). La copia de lectura para este repo es [docs/PROTOCOL-v1.md](docs/PROTOCOL-v1.md) (copia de cellCam; no se edita aquí). Si el código de cellCam y ese archivo discrepan, se corrige el código de cellCam en su propio repo, no se adapta Camdesk a un desvío.
 - La cámara del teléfono no se compone encima de la grabación. La cámara virtual muestra solo el teléfono, ya rotado.
 - cellCam no envía audio (`HS_FLAG_AUDIO` está reservado y no hace nada). Zoom y Meet usan el micrófono que el usuario elige dentro de cada app.
 - Quedan fuera: HEVC, mDNS, escenas, filtros salvo los dos de "Efectos", reemplazo del fondo por una imagen, streaming, micrófono virtual, instalar la cámara para todos los usuarios, `libx264`.
@@ -239,7 +239,14 @@ En `spikes/vcam/`, en Windows. Una DLL mínima que lee un patrón de un archivo 
 
 Si alguna respuesta exige administrador o Zoom/Meet no la listan, **se para y se decide con el usuario** entre "administrador una sola vez" y el respaldo DirectShow [softcam](https://github.com/tshino/softcam). No se implementan los dos a la vez.
 
-Resultados del paso 0: _pendiente_.
+Resultados del paso 0, en esta PC (Windows 11 build 26200). El usuario eligió administrador una sola vez.
+
+1. El CLSID en `HKCU` no alcanza. Sin elevar, `MFCreateVirtualCamera` (`CurrentUser`) devuelve `S_OK` y `Start` devuelve `0x80070003` si el CLSID no está en `HKLM`. Frame Server corre como `LOCAL SERVICE` y no ve `HKCU`. Escribir el CLSID en `HKLM` sin elevar devuelve `0x80070005`. Con el CLSID ya escrito en `HKLM\Software\Classes`, un proceso sin elevar obtiene `Start` `S_OK`. La cámara aparece como `cellCam (Windows Virtual Camera)`: Windows agrega ese sufijo. `IMFVirtualCamera::Remove` no borra la clave; después de una sonda exitosa seguía en `HKLM`.
+2. Frame Server carga la DLL como `LOCAL SERVICE` (`S-1-5-19`) desde `%ProgramData%\Camdesk\`. Desde el perfil del usuario, con la ACL de siempre, `Start` devuelve `0x80070005` y el servicio no carga la DLL. Si a ese archivo se le agrega lectura y ejecución para `LOCAL SERVICE`, el servicio sí la carga. `%ProgramFiles%\Camdesk` también la carga; crear esa carpeta pide administrador. `%ProgramData%\Camdesk` no.
+3. Con la ACL de lectura, el servicio abrió `%ProgramData%\Camdesk\cellcam-vcam.bin` (`shm=ok`, error 0). El primer lector usaba `InterlockedCompareExchange` sobre un mapeo de solo lectura y Frame Server terminaba con `0xC0000005` en `cellcam_spike.dll`. El lector del spike ahora lee el seqlock con cargas volátiles y una barrera, sin escribir en la vista. Repetido el arranque, no hubo otro error de aplicación desde las 21:00. El cliente de Media Foundation recibió 7 muestras y la barra cambió de columna: 1584 y después 1800, y en otra corrida 1560 y después 1776.
+4. Zoom no está instalado. En Chrome el selector lista `cellCam (Windows Virtual Camera)` junto a `OBS Virtual Camera`. `getUserMedia` sobre cellCam devolvió `NotReadableError`. En ese intento Frame Server igual inicializó el dispositivo con `hr` 0, una secuencia, 1920x1080 y 30 fps. La página no mostró la barra: siguió con OBS Virtual Camera. Meet no se abrió. La aplicación Cámara de Windows, abierta con la sesión ya cerrándose, respondió `0xA00F4244` (`NoCamerasAreAttached`).
+
+El crate `vcam` sigue vacío. El CLSID de `HKLM` no quedó registrado. No quedaron la DLL ni el archivo mapeado en `%ProgramData%\Camdesk` ni en `%ProgramFiles%\Camdesk`. El lector del crate `vcam-shm` no puede usar una operación que escribe sobre el mapeo de solo lectura: es lo que tumbó a Frame Server.
 
 ## Grabación
 

@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/app",
+    "crates/protocol",
+    "crates/link",
+    "crates/decode",
+    "crates/fx",
+    "crates/vcam-shm",
+    "crates/vcam",
+    "crates/record",
+]
