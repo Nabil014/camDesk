@@ -2,3 +2,7 @@
 name = "decode"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+protocol = { path = "../protocol" }
+libloading = "0.8"

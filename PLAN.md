@@ -92,51 +92,68 @@ Esqueleto para que todos arranquen a la vez. Los campos exactos del handshake y 
 // protocol — sin E/S
 pub const PORT: u16 = 4747;
 pub enum Rotation { R0, R90, R180, R270 }
-pub struct HandshakeRequest { /* campos de PROTOCOL.md */ }
-pub struct HandshakeResponse { pub status: HandshakeStatus, pub width: u32, pub height: u32, /* … */ }
-pub enum FrameKind { CodecConfig, Video, Control, /* … */ }
+pub enum HandshakeStatus { Ok, Adjusted, Version, Codec, Camera, Other(u8) }
+pub enum ProtocolError { BadMagic, Desync }
+pub struct HandshakeRequest { pub version: u8, pub codec: u8, pub width: u16, pub height: u16, pub fps: u8, pub camera: u8, pub flags: u8 }
+pub struct HandshakeResponse { pub status: HandshakeStatus, pub version: u8, pub codec: u8, pub width: u32, pub height: u32, pub fps: u8, pub camera: u8, pub flags: u8 }
+pub enum FrameKind { Video, CodecConfig, Audio, Control, Other(u8) }
 pub struct FrameHeader { pub kind: FrameKind, pub keyframe: bool, pub rotation: Rotation, pub pts_us: i64, pub len: u32 }
 pub struct Frame { pub header: FrameHeader, pub payload: Vec<u8> }
-impl HandshakeRequest { pub fn to_bytes(&self) -> [u8; 16]; }
-impl HandshakeResponse { pub fn parse(b: &[u8; 16]) -> Result<Self, ProtocolError>; }
-pub struct FrameParser;            // push(&[u8]), next() -> Option<Result<Frame, Desync>>; resync a FRM0
+impl HandshakeRequest { pub fn video(width, height, fps, camera, flags) -> Self; pub fn to_bytes(&self) -> [u8; 16]; pub fn parse(b: &[u8; 16]) -> Result<Self, ProtocolError>; }
+impl HandshakeResponse { pub fn parse(b: &[u8; 16]) -> Result<Self, ProtocolError>; pub fn to_bytes(&self) -> [u8; 16]; }
+pub struct FrameParser;            // push(&[u8]), next() -> Option<Result<Frame, ProtocolError>>; resync a FRM0
 pub fn request_keyframe() -> Vec<u8>;
 
 // link — usa std::net y procesos adb, sin FFmpeg ni UI
 pub enum Mode { Auto, Usb, Wifi(std::net::Ipv4Addr) }
 pub enum Resolution { P720, P1080 }
 pub enum Camera { Back, Front }
-pub struct SessionConfig { pub mode: Mode, pub resolution: Resolution, pub camera: Camera }
+pub struct SessionConfig { pub mode: Mode, pub resolution: Resolution, pub camera: Camera, pub wifi: Option<std::net::Ipv4Addr> }
 pub enum Status { Conectando, EnVivo { width: u32, height: u32 }, Desconectado, Ocupado, NoAutorizado, Incompatible }
 pub enum Event { Status(Status), Frame(protocol::Frame) }
 pub struct Session;                // start(cfg) -> (Session, Receiver<Event>); request_keyframe(); Drop = cerrar + forward --remove
+```
 
+`wifi` es el respaldo del modo automático cuando no hay un `device` de adb. El estado 4 del teléfono (`STATUS_ERROR_CAMERA`, también el rechazo de un segundo cliente) se informa como `Ocupado`.
+
+```rust
 // decode — carga FFmpeg en Decoder::new(), nunca antes
 pub struct Decoder;                // new() -> Result; push(&Frame) -> Result<Option<Decoded>, DecodeError>; reset()
 pub struct Decoded { pub width: u32, pub height: u32, pub bgra: Vec<u8>, pub pts_us: i64 } // ya rotado
-impl Decoder { pub fn to_canvas_nv12(&mut self, d: &Decoded, y: &mut [u8], uv: &mut [u8], stride: usize); } // 1920x1080, barras negras
+pub enum DecodeError { NeedKeyframe, Message(String) }
+impl Decoder { pub fn to_canvas_nv12(&mut self, d: &Decoded, y: &mut [u8], uv: &mut [u8], stride: usize); } // 1920x1080, barras Y=16 UV=128
 
 // fx — sobre BGRA en memoria; no conoce cellCam, el decoder ni el lienzo
 pub struct ColorParams { pub brightness: f32, pub contrast: f32, pub saturation: f32, pub temperature: f32 } // -1.0..=1.0, 0 = neutro
-pub struct ColorCorrector;         // set(ColorParams); apply(bgra: &mut [u8], width, height, stride); neutro = no toca el frame
+pub struct ColorCorrector;         // new(); set(ColorParams); apply(bgra: &mut [u8], width, height, stride); neutro = no toca el frame
 pub enum BlurAvailability { Available, NoNvidiaGpu, NoRuntime }
 pub fn blur_availability() -> BlurAvailability;  // chequeo liviano, no carga el runtime
-pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(bgra: &mut [u8], width, height, stride) -> Result<(), FxError>
+pub struct FxError { pub message: String }
+pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(...) -> Result<(), FxError>
+// new() sigue fallando a propósito si el runtime está: este build todavía no corre GreenScreen.
 
 // vcam-shm
 pub const WIDTH: u32 = 1920; pub const HEIGHT: u32 = 1080; pub const STRIDE: u32 = 1920;
-pub fn default_path() -> std::path::PathBuf;    // la fija el paso 0
+pub fn default_path() -> std::path::PathBuf;    // %ProgramData%\Camdesk\cellcam-vcam.bin
+pub struct FrameInfo { pub pts_100ns: i64, pub sequence: u64 }
 pub struct Writer;                 // create(path) -> io::Result; write(pts_100ns, |y, uv| …)
 pub struct Reader;                 // open(path) -> io::Result; read_latest(&mut y, &mut uv) -> Option<FrameInfo>
+// El lector solo hace loads Acquire. No usa InterlockedCompareExchange sobre el mapa de solo lectura.
 
-// vcam (rlib)
+// vcam (rlib) — vacío hasta el paso 2
 pub struct VirtualCamera;          // create() -> windows::core::Result; Drop = baja
 
 // record — no conoce cellCam
+pub struct MonitorId(pub String);  // índice de monitor, en base 1
+pub struct MicId(pub String);
+pub struct MonitorInfo { pub id: MonitorId, pub name: String, pub width: u32, pub height: u32 }
+pub struct MicInfo { pub id: MicId, pub name: String }
 pub fn monitors() -> Vec<MonitorInfo>;
 pub fn microphones() -> Vec<MicInfo>;   // el primero es el de comunicaciones por defecto
+pub fn default_output() -> std::path::PathBuf; // Videos\Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4
+pub fn video_encoder_name() -> Result<String, RecordError>; // abre y cierra NVENC, AMF, Quick Sync o h264_mf
 pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub mic: Option<MicId>, pub output: std::path::PathBuf }
-pub struct Recording;              // start(cfg) -> Result; elapsed(); stop() -> Result<PathBuf>
+pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); error(); stop() -> Result<PathBuf>
 ```
 
 `decode` señala con `DecodeError` cuando necesita un keyframe; `app` llama a `Session::request_keyframe()`.

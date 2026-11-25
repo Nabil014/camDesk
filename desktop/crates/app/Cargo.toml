@@ -2,3 +2,9 @@
 name = "camdesk"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+fx = { path = "../fx" }
+link = { path = "../link" }
+record = { path = "../record" }
