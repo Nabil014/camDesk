@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camdesk — maqueta</title>
+<style>
+  :root {
+    --bg: #121212;
+    --text: #f3f3f3;
+    --muted: #8d8d8d;
+    --line: rgba(255,255,255,.08);
+    --live: #3dba86;
+    --rec: #e23d3d;
+    --warn: #d7a441;
+    --info: #9ec0dc;
+    --danger: #e07a7a;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; background: #0c0c0c; color: var(--text); font: 13px/1.4 "Segoe UI", sans-serif; }
+  button, input { font: inherit; color: inherit; }
+  .page { height: 100%; display: flex; flex-direction: column; padding: 14px 16px 16px; gap: 10px; }
+  .top { display: flex; align-items: center; gap: 12px; min-height: 28px; }
+  .top p { margin: 0; color: #666; white-space: nowrap; font-size: 12px; }
+  .states { display: flex; gap: 2px; overflow-x: auto; flex: 1; }
+  .states button {
+    flex: none; background: transparent; color: #8a8a8a; border: 0;
+    border-radius: 999px; padding: 4px 10px; cursor: pointer;
+  }
+  .states button.on { color: var(--text); background: #222; }
+  .window {
+    flex: 1; min-height: 0; display: flex; flex-direction: column;
+    background: var(--bg); border-radius: 16px; overflow: hidden;
+  }
+  .banner {
+    display: none; align-items: baseline; gap: 8px;
+    margin: 14px 18px 0; padding: 0; background: transparent; border: 0; font-size: 12px;
+  }
+  .banner.show { display: flex; }
+  .banner b { font-weight: 600; flex: none; }
+  .banner span { color: var(--muted); }
+  .banner.info b { color: var(--info); }
+  .banner.success b { color: var(--live); }
+  .banner.warning b { color: var(--warn); }
+  .banner.danger b { color: var(--danger); }
+  .workspace { flex: 1; min-height: 0; display: flex; }
+  .preview-dock { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+  .preview-dock .dock-title { display: none; }
+  .preview-canvas {
+    flex: 1; min-height: 0; background: transparent;
+    display: flex; align-items: center; justify-content: center;
+    padding: 18px 8px 40px 18px;
+    container-type: size;
+  }
+  .frame {
+    position: relative; background: #000; overflow: hidden; border-radius: 12px;
+    width: min(100cqw, calc(100cqh * 16 / 9)); aspect-ratio: 16 / 9;
+  }
+  .frame.portrait { width: min(100cqw, calc(100cqh * 9 / 16)); aspect-ratio: 9 / 16; }
+  .frame.empty {
+    width: min(100%, 520px); height: auto; min-height: 180px; aspect-ratio: auto;
+    background: transparent; border-radius: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .scene, .bg, .subject { position: absolute; inset: 0; }
+  .bg {
+    background:
+      radial-gradient(50% 40% at 70% 18%, rgba(255,255,255,.28), transparent 60%),
+      linear-gradient(#a9b8c4 0%, #7e93a3 42%, #5d6d58 42%, #3a4536 100%);
+  }
+  .subject::before, .subject::after {
+    content: ""; position: absolute; left: 50%; transform: translateX(-50%);
+  }
+  .subject::before {
+    top: 22%; width: 12%; aspect-ratio: 1; border-radius: 50%; background: #ead8c8;
+  }
+  .subject::after {
+    top: 38%; width: 24%; height: 30%; border-radius: 46% 46% 18% 18%; background: #344456;
+  }
+  .frame.blur .bg { filter: blur(16px) saturate(1.05); transform: scale(1.08); }
+  .bug, .frozen {
+    position: absolute; display: none; align-items: center; gap: 6px;
+    padding: 4px 8px; border-radius: 999px; background: rgba(0,0,0,.45);
+    font-size: 11px; font-weight: 600; backdrop-filter: blur(8px);
+  }
+  .bug { top: 10px; left: 10px; color: #fff; }
+  .bug.show, .frozen.show { display: inline-flex; }
+  .bug i { width: 6px; height: 6px; border-radius: 50%; background: var(--rec); }
+  .frozen { right: 10px; bottom: 10px; color: #f0d7a4; }
+  .empty-copy { display: none; max-width: 340px; text-align: center; color: var(--muted); padding: 8px; }
+  .frame.empty .empty-copy { display: block; }
+  .preview-foot {
+    position: absolute; left: 22px; bottom: 14px; height: auto;
+    border: 0; background: transparent; color: var(--muted); font-size: 12px;
+  }
+  .docks {
+    width: 292px; flex: none; display: flex; flex-direction: column;
+    border-left: 1px solid var(--line); min-height: 0; padding: 6px 0 12px;
+  }
+  .dock { display: flex; flex-direction: column; border: 0; }
+  .dock.grow { min-height: 0; }
+  .dock-title {
+    height: auto; display: flex; align-items: center;
+    padding: 16px 18px 2px; background: transparent; border: 0;
+    color: #6f6f6f; font-size: 11px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase;
+  }
+  .dock-body { padding: 8px 18px 4px; display: flex; flex-direction: column; gap: 8px; }
+  .dock.grow .dock-body { overflow: auto; }
+  .seg { display: flex; padding: 2px; gap: 0; background: #1b1b1b; border-radius: 9px; }
+  .seg button {
+    flex: 1; padding: 6px 4px; color: var(--muted); background: transparent;
+    border: 0; border-radius: 7px; cursor: pointer;
+  }
+  .seg button.on { background: #2c2c2c; color: var(--text); }
+  .field {
+    width: 100%; background: #1b1b1b; border: 0; border-radius: 9px;
+    padding: 8px 10px; color: var(--text);
+  }
+  .field::placeholder { color: #5e5e5e; }
+  .field:disabled { color: #555; }
+  .combo { color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+  .line { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
+  .switch {
+    width: 34px; height: 20px; border-radius: 99px; border: 0;
+    background: #2a2a2a; padding: 2px; cursor: pointer; flex: none;
+  }
+  .switch i { display: block; width: 16px; height: 16px; border-radius: 50%; background: #9a9a9a; transition: transform .15s ease; }
+  .switch.on { background: #2f6d52; }
+  .switch.on i { transform: translateX(14px); background: #fff; }
+  .switch:disabled { opacity: .35; cursor: default; }
+  .slider { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .slider input { flex: 1; accent-color: #d0d0d0; }
+  .obs-btn {
+    height: 34px; margin-top: 2px; border: 0; border-radius: 9px; cursor: pointer;
+    background: #f2f2f2; color: #141414; font-weight: 650;
+  }
+  #record { background: transparent; color: var(--text); box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); font-weight: 600; }
+  #record.rec-on { background: var(--rec); color: #fff; box-shadow: none; }
+  .obs-btn:disabled { opacity: .4; cursor: default; }
+  .disclosure {
+    display: flex; justify-content: space-between; width: 100%;
+    background: transparent; border: 0; padding: 4px 0; cursor: pointer; text-align: left; color: var(--text);
+  }
+  .disclosure em { font-style: normal; color: var(--warn); font-size: 12px; }
+  .colors { display: none; gap: 8px; }
+  .colors.show { display: flex; flex-direction: column; }
+  .linkish { align-self: flex-start; background: none; border: 0; padding: 0; color: var(--info); cursor: pointer; }
+  .hint { margin: 0; color: var(--muted); font-size: 12px; }
+  .hint:empty { display: none; }
+  .meter { height: 3px; background: #2a2a2a; border: 0; border-radius: 99px; display: flex; overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--live); width: 0; }
+  .meter.on i { width: var(--lvl); }
+  .status {
+    height: 40px; flex: none; display: flex; align-items: center; gap: 14px;
+    padding: 0 18px; background: transparent; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px;
+  }
+  .status .main { color: var(--text); }
+  .status .main.live { color: var(--live); }
+  .status .main.info { color: var(--info); }
+  .status .main.warn { color: var(--warn); }
+  .status .main.danger { color: var(--danger); }
+  .status .spacer { flex: 1; }
+  .recstat { color: var(--rec); font-weight: 650; }
+  @media (max-width: 860px) {
+    .workspace { flex-direction: column; }
+    .docks { width: auto; border-left: 0; border-top: 1px solid var(--line); }
+    .page { height: auto; }
+    .window { min-height: 760px; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <p>Estados</p>
+    <div class="states" id="states"></div>
+  </div>
+  <div class="window">
+    <div class="banner" id="notice"><b id="noticeLead"></b><span id="noticeBody"></span></div>
+    <div class="workspace">
+      <section class="preview-dock">
+        <div class="dock-title">Vista previa</div>
+        <div class="preview-canvas">
+          <div class="frame empty" id="frame">
+            <div class="scene" id="scene"><div class="bg"></div><div class="subject"></div></div>
+            <div class="bug" id="recbadge"><i></i>REC</div>
+            <div class="frozen" id="frozen">Último cuadro</div>
+            <div class="empty-copy" id="emptyCopy"></div>
+          </div>
+        </div>
+        <div class="preview-foot" id="caption"></div>
+      </section>
+      <aside class="docks">
+        <section class="dock">
+          <div class="dock-title">Conexión</div>
+          <div class="dock-body">
+            <div class="seg" data-group="mode">
+              <button class="on" data-value="auto">Automática</button>
+              <button data-value="usb">Solo USB</button>
+              <button data-value="wifi">Solo Wi-Fi</button>
+            </div>
+            <input class="field" id="ip" placeholder="IP del teléfono">
+            <div class="seg" data-group="res">
+              <button class="on" data-value="720">720p</button>
+              <button data-value="1080">1080p</button>
+            </div>
+            <div class="seg" data-group="cam">
+              <button class="on" data-value="back">Trasera</button>
+              <button data-value="front">Frontal</button>
+            </div>
+            <button class="obs-btn" id="connect">Conectar</button>
+          </div>
+        </section>
+        <section class="dock grow">
+          <div class="dock-title">Imagen</div>
+          <div class="dock-body">
+            <label class="line">Desenfocar fondo <button class="switch" id="blur" type="button" aria-pressed="false"><i></i></button></label>
+            <div class="slider" id="strengthRow" hidden>
+              <span>Fuerza</span>
+              <input id="strength" type="range" min="0" max="100" value="60">
+              <span id="strengthVal">60</span>
+            </div>
+            <p class="hint" id="blurReason"></p>
+            <button class="disclosure" id="colorToggle" type="button"><span>Corrección de color</span><em id="colorFlag" hidden>Ajustada</em></button>
+            <div class="colors" id="colors">
+              <div class="slider"><span>Brillo</span><input class="color" type="range" min="-100" max="100" value="0"></div>
+              <div class="slider"><span>Contraste</span><input class="color" type="range" min="-100" max="100" value="0"></div>
+              <div class="slider"><span>Saturación</span><input class="color" type="range" min="-100" max="100" value="0"></div>
+              <div class="slider"><span>Temperatura</span><input class="color" type="range" min="-100" max="100" value="0"></div>
+              <button class="linkish" id="resetColor" type="button">Restablecer</button>
+            </div>
+          </div>
+        </section>
+        <section class="dock rec">
+          <div class="dock-title">Grabación</div>
+          <div class="dock-body">
+            <label class="line">Monitor <span class="combo">Pantalla 1 <span>▾</span></span></label>
+            <label class="line">Audio del sistema <button class="switch on" id="sys" type="button"><i></i></button></label>
+            <div class="meter on" id="sysMeter" style="--lvl:68%"><i></i></div>
+            <label class="line">Micrófono <button class="switch on" id="mic" type="button"><i></i></button></label>
+            <div class="meter on" id="micMeter" style="--lvl:36%"><i></i></div>
+            <button class="obs-btn" id="record">Grabar</button>
+          </div>
+        </section>
+      </aside>
+    </div>
+    <footer class="status">
+      <span>cellCam</span>
+      <span class="main" id="pillText">Desconectada</span>
+      <span class="spacer"></span>
+      <span id="encoder"></span>
+      <span class="recstat" id="time" hidden>REC 04:12</span>
+    </footer>
+  </div>
+</div>
+<script>
+const STATES = [
+  ["idle", "Al abrir"],
+  ["connecting", "Conectando"],
+  ["live", "En vivo"],
+  ["portrait", "Vertical"],
+  ["recording", "Grabando"],
+  ["rec-only", "Solo grabación"],
+  ["frozen", "Último cuadro"],
+  ["busy", "Ocupado"],
+  ["usb", "Depuración USB"],
+  ["version", "Versión"],
+  ["noblur", "Sin desenfoque"],
+  ["saved", "Guardado"]
+];
+const PRESETS = {
+  idle: { pill: "Desconectada", tone: "", preview: "empty", caption: "Zoom recibe cellCam a 1920×1080", empty: "La imagen aparece al conectar. Hasta el primer cuadro, Zoom ve la cámara en negro.", connect: "Conectar" },
+  connecting: { pill: "Conectando", tone: "info", preview: "empty", empty: "Buscando el teléfono. USB primero. Si no hay cable, sigue por la IP.", caption: "Reintento cada 2 segundos", notice: ["info", "Conectando", "USB si el teléfono está autorizado. Si no, la IP."], connect: "Cancelar" },
+  live: { pill: "En vivo · 1280×720", tone: "live", preview: "landscape", caption: "1280×720 · Trasera · USB · Zoom recibe 1920×1080", notice: ["success", "En vivo", "La vista previa y cellCam reciben la imagen. La grabación no."], connect: "Desconectar" },
+  portrait: { pill: "En vivo · 720×1280", tone: "live", preview: "portrait", caption: "720×1280 · Trasera · USB · Zoom recibe 1920×1080 con barras", notice: ["info", "Teléfono vertical", "La vista previa muestra el teléfono. Las barras las agrega Zoom."], connect: "Desconectar" },
+  recording: { pill: "En vivo · 1280×720", tone: "live", preview: "landscape", rec: "04:12", caption: "1280×720 · Trasera · USB · Zoom recibe 1920×1080", notice: ["success", "Grabando 04:12", "Graba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes."], connect: "Desconectar", encoder: "NVENC · 30 fps" },
+  "rec-only": { pill: "Desconectada", tone: "", preview: "empty", rec: "04:12", empty: "Grabando sin cámara. La vista previa sigue vacía.", caption: "cellCam permanece en negro", notice: ["info", "Grabando sin cámara", "La grabación es otro trabajo. Empieza aunque no haya teléfono."], connect: "Conectar", encoder: "NVENC · 30 fps" },
+  frozen: { pill: "Desconectada", tone: "warn", preview: "landscape", frozen: true, caption: "Zoom se quedó en esta imagen", notice: ["warning", "Último cuadro", "Si se corta la red, la cámara virtual no pasa a negro."], connect: "Conectar" },
+  busy: { pill: "Ocupado", tone: "warn", preview: "empty", empty: "Sin imagen.", caption: "Zoom recibe cellCam a 1920×1080", notice: ["warning", "Teléfono ocupado", "Otro cliente ya está conectado. Cerrar OBS y volver a conectar."], connect: "Conectar" },
+  usb: { pill: "Sin autorizar", tone: "warn", preview: "empty", empty: "Sin imagen.", caption: "Reintento cada 2 segundos", notice: ["warning", "Teléfono no autorizado", "Aceptar la depuración USB en el teléfono. Camdesk reintenta cada 2 segundos."], connect: "Cancelar" },
+  version: { pill: "Incompatible", tone: "danger", preview: "empty", empty: "Sin imagen.", caption: "No hay reintento útil", notice: ["danger", "Versión incompatible", "cellCam habla otra versión del protocolo. Actualizar el teléfono o Camdesk."], connect: "Conectar" },
+  noblur: { pill: "En vivo · 1280×720", tone: "live", preview: "landscape", caption: "1280×720 · Trasera · USB · Zoom recibe 1920×1080", notice: ["warning", "Sin desenfoque", "Sin GPU NVIDIA, o sin el runtime de NVIDIA Video Effects. La cámara sigue."], connect: "Desconectar", blurOff: true },
+  saved: { pill: "En vivo · 1280×720", tone: "live", preview: "landscape", caption: "1280×720 · Trasera · USB · Zoom recibe 1920×1080", notice: ["success", "Grabación guardada", "Videos\\Camdesk\\grabacion-20261124-2316.mp4"], connect: "Desconectar" }
+};
+
+const $ = (id) => document.getElementById(id);
+let current = "idle";
+let recording = false;
+let seconds = 0;
+let timer = null;
+
+function renderStates() {
+  const box = $("states");
+  for (const [id, label] of STATES) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.dataset.id = id;
+    b.onclick = () => apply(id);
+    box.appendChild(b);
+  }
+}
+
+function apply(id) {
+  current = id;
+  const s = PRESETS[id];
+  recording = Boolean(s.rec);
+  document.querySelectorAll("#states button").forEach((b) => b.classList.toggle("on", b.dataset.id === id));
+  const main = $("pillText");
+  main.textContent = s.pill;
+  main.className = "main" + (s.tone ? " " + s.tone : "");
+  $("time").hidden = !s.rec;
+  $("time").textContent = s.rec ? "REC  " + s.rec : "";
+  $("encoder").textContent = s.encoder || "";
+  const notice = $("notice");
+  if (s.notice) {
+    notice.className = "banner show " + s.notice[0];
+    $("noticeLead").textContent = s.notice[1];
+    $("noticeBody").textContent = s.notice[2];
+  } else notice.className = "banner";
+  const frame = $("frame");
+  frame.className = "frame" + (s.preview === "portrait" ? " portrait" : s.preview === "empty" ? " empty" : "");
+  $("scene").style.display = s.preview === "empty" ? "none" : "block";
+  $("emptyCopy").textContent = s.empty || "";
+  $("recbadge").classList.toggle("show", Boolean(s.rec) && s.preview !== "empty");
+  $("frozen").classList.toggle("show", Boolean(s.frozen));
+  $("caption").textContent = s.caption;
+  $("connect").textContent = s.connect;
+  $("record").textContent = s.rec ? "Detener" : "Grabar";
+  $("record").classList.toggle("rec-on", Boolean(s.rec));
+  const blur = $("blur");
+  if (s.blurOff) {
+    blur.disabled = true;
+    blur.classList.remove("on");
+    blur.setAttribute("aria-pressed", "false");
+    $("strengthRow").hidden = true;
+    $("blurReason").textContent = "Sin GPU NVIDIA o sin el runtime. No hay efecto de respaldo.";
+  } else {
+    blur.disabled = false;
+    $("blurReason").textContent = "";
+  }
+  frame.classList.toggle("blur", blur.classList.contains("on") && s.preview !== "empty");
+}
+
+function segValue(group) {
+  return document.querySelector(`.seg[data-group="${group}"] button.on`).dataset.value;
+}
+function validIp(v) { return /^(?:\d{1,3}\.){3}\d{1,3}$/.test(v.trim()); }
+
+document.querySelectorAll(".seg").forEach((seg) => {
+  seg.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    seg.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+    if (seg.dataset.group === "mode") {
+      $("ip").disabled = b.dataset.value === "usb";
+      $("ip").placeholder = b.dataset.value === "wifi" ? "IP del teléfono" : "IP, si hace falta";
+    }
+    refreshCaption();
+  });
+});
+
+function refreshCaption() {
+  if (!["live", "portrait", "recording", "noblur", "saved"].includes(current)) return;
+  const portrait = current === "portrait";
+  const res = segValue("res") === "1080"
+    ? (portrait ? "1080×1920" : "1920×1080")
+    : (portrait ? "720×1280" : "1280×720");
+  const cam = segValue("cam") === "front" ? "Frontal" : "Trasera";
+  const link = segValue("mode") === "wifi" ? "Wi-Fi" : "USB";
+  $("caption").textContent = `${res} · ${cam} · ${link} · Zoom recibe 1920×1080${portrait ? " con barras" : ""}`;
+  if (!portrait) $("pillText").textContent = "En vivo · " + res;
+}
+
+function showNotice(tone, lead, body) {
+  $("notice").className = "banner show " + tone;
+  $("noticeLead").textContent = lead;
+  $("noticeBody").textContent = body;
+}
+
+$("connect").onclick = () => {
+  if (current === "connecting" || current === "usb") { apply("idle"); return; }
+  if (["live", "portrait", "recording", "noblur", "saved"].includes(current)) {
+    apply(recording ? "frozen" : "idle");
+    return;
+  }
+  const mode = segValue("mode");
+  const ip = $("ip").value.trim();
+  if (mode === "wifi" && !validIp(ip)) {
+    showNotice("warning", "Falta una IP válida", "En Solo Wi-Fi hace falta la IP del teléfono.");
+    return;
+  }
+  if (mode === "auto" && ip && !validIp(ip)) {
+    showNotice("warning", "La IP no es válida", "Dejala vacía para buscar por USB, o escribí una IP completa.");
+    return;
+  }
+  apply("connecting");
+  setTimeout(() => { if (current === "connecting") apply("live"); }, 900);
+};
+
+$("blur").onclick = () => {
+  if ($("blur").disabled) return;
+  const on = !$("blur").classList.contains("on");
+  $("blur").classList.toggle("on", on);
+  $("blur").setAttribute("aria-pressed", String(on));
+  $("strengthRow").hidden = !on;
+  $("frame").classList.toggle("blur", on && !$("frame").classList.contains("empty"));
+};
+$("strength").oninput = () => { $("strengthVal").textContent = $("strength").value; };
+$("colorToggle").onclick = () => { $("colors").classList.toggle("show"); };
+document.querySelectorAll(".color").forEach((el) => {
+  el.oninput = () => {
+    $("colorFlag").hidden = ![...document.querySelectorAll(".color")].some((x) => x.value !== "0");
+  };
+});
+$("resetColor").onclick = () => {
+  document.querySelectorAll(".color").forEach((x) => { x.value = "0"; });
+  $("colorFlag").hidden = true;
+};
+
+function tick() {
+  seconds += 1;
+  const m = String(Math.floor(seconds / 60)).padStart(2, "0");
+  const s = String(seconds % 60).padStart(2, "0");
+  $("time").textContent = "REC  " + m + ":" + s;
+}
+$("record").onclick = () => {
+  if (recording) {
+    recording = false;
+    clearInterval(timer);
+    $("record").textContent = "Grabar";
+    $("record").classList.remove("rec-on");
+    $("time").hidden = true;
+    $("recbadge").classList.remove("show");
+    $("encoder").textContent = "";
+    showNotice("success", "Grabación guardada", "Videos\\Camdesk\\grabacion-20261124-2316.mp4");
+    return;
+  }
+  recording = true;
+  seconds = 0;
+  $("record").textContent = "Detener";
+  $("record").classList.add("rec-on");
+  $("time").hidden = false;
+  $("time").textContent = "REC  00:00";
+  $("encoder").textContent = "NVENC · 30 fps";
+  if (!$("frame").classList.contains("empty")) $("recbadge").classList.add("show");
+  const live = ["live", "portrait", "noblur", "saved", "recording"].includes(current);
+  showNotice(live ? "success" : "info", live ? "Grabando 00:00" : "Grabando sin cámara",
+    live
+      ? "Graba el monitor. No usa el teléfono ni los efectos. El micrófono no sale por los parlantes."
+      : "La grabación es otro trabajo. Empieza aunque no haya teléfono.");
+  clearInterval(timer);
+  timer = setInterval(tick, 1000);
+};
+for (const id of ["sys", "mic"]) {
+  $(id).onclick = () => {
+    const on = !$(id).classList.contains("on");
+    $(id).classList.toggle("on", on);
+    $(id === "sys" ? "sysMeter" : "micMeter").classList.toggle("on", on);
+  };
+}
+
+renderStates();
+apply("live");
+</script>
+</body>
+</html>
