@@ -157,7 +157,7 @@ pub fn microphones() -> Vec<MicInfo>;   // el primero es el de comunicaciones po
 pub fn default_output() -> std::path::PathBuf; // Videos\Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4
 pub fn video_encoder_name() -> Result<String, RecordError>; // abre y cierra NVENC, AMF, Quick Sync o h264_mf
 pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub mic: Option<MicId>, pub output: std::path::PathBuf }
-pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); error(); stop() -> Result<PathBuf>
+pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); levels() -> (f32, f32); error(); stop() -> Result<PathBuf>
 ```
 
 `decode` señala con `DecodeError` cuando necesita un keyframe; `app` llama a `Session::request_keyframe()`.
@@ -278,7 +278,7 @@ El paso 3 cablea `app`. Conectar crea el decoder, el archivo mapeado y llama a `
 - Pantalla: `windows-capture` (Windows.Graphics.Capture), monitor elegido en la UI, resolución nativa del monitor.
 - **30 fps constantes.** WGC solo entrega frames cuando cambia la pantalla: si no llega uno a tiempo se repite el último. Si el encode se atrasa, se descarta el frame de pantalla más viejo.
 - Audio del sistema: WASAPI loopback del dispositivo de reproducción por defecto. **El loopback no entrega paquetes en silencio**: el hueco se rellena con ceros según el reloj, si no el audio se corre.
-- Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes.
+- Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes. Mientras se graba, la UI muestra el nivel reciente de cada pista, de silencio a 0 dB; al abrir la ventana esas barras quedan vacías y no se abre WASAPI.
 - Las dos pistas pasan a 48 kHz estéreo float, se suman y se recortan. Cada una se puede apagar.
 - Reloj común: `QueryPerformanceCounter`. Cada pista se alinea a ese reloj; si se corre más de 20 ms, se insertan o descartan muestras.
 - Si cambia el dispositivo por defecto en medio de la grabación, se reabre y el hueco va en silencio. La grabación no se corta.

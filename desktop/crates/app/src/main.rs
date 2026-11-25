@@ -249,6 +249,7 @@ impl CamdeskApp {
 
     fn record_ui(&mut self, ui: &mut egui::Ui) {
         section(ui, "Grabación");
+        self.ensure_monitors();
         ui.horizontal(|ui| {
             ui.label("Monitor");
             let label = self.monitor_label();
@@ -267,8 +268,12 @@ impl CamdeskApp {
                 });
         });
         self.dirty |= toggle(ui, &mut self.system_audio, "Audio del sistema").changed();
+        if self.system_audio {
+            level_meter(ui, self.meter_level(true));
+        }
         self.dirty |= toggle(ui, &mut self.mic_on, "Micrófono").changed();
         if self.mic_on {
+            level_meter(ui, self.meter_level(false));
             let mic_label = self
                 .mics
                 .iter()
@@ -586,6 +591,12 @@ impl CamdeskApp {
         self.monitors.first().map(|item| item.id.clone())
     }
 
+    fn meter_level(&self, system: bool) -> f32 {
+        let Some(recording) = &self.recording else { return 0.0 };
+        let (system_level, mic_level) = recording.levels();
+        if system { system_level } else { mic_level }
+    }
+
     fn monitor_label(&self) -> String {
         self.monitors
             .iter()
@@ -746,7 +757,7 @@ impl eframe::App for CamdeskApp {
         if self.session.is_some() {
             ctx.request_repaint_after(Duration::from_millis(16));
         } else if self.recording.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(200));
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
@@ -842,6 +853,20 @@ fn segments<T: Copy + PartialEq>(ui: &mut egui::Ui, value: &mut T, options: &[(&
             });
         });
     changed
+}
+
+fn level_meter(ui: &mut egui::Ui, level: f32) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 3.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(0x2a, 0x2a, 0x2a));
+    let fill = rect.width() * level.clamp(0.0, 1.0);
+    if fill > 0.5 {
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(fill, rect.height())),
+            2.0,
+            LIVE,
+        );
+    }
 }
 
 fn toggle(ui: &mut egui::Ui, on: &mut bool, label: &str) -> egui::Response {
