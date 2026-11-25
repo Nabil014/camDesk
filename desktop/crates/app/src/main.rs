@@ -7,7 +7,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use eframe::egui;
-use fx::{BackgroundBlur, BlurAvailability, ColorParams, blur_availability};
+use fx::{BackgroundBlur, BlurAvailability, ColorCorrector, ColorParams, blur_availability};
 use link::{Camera, Event, Mode, Resolution, Session, SessionConfig, Status};
 use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
 
@@ -44,6 +44,14 @@ struct CamdeskApp {
     notice: String,
     session: Option<Session>,
     events: Option<Receiver<Event>>,
+    decoder: Option<decode::Decoder>,
+    writer: Option<vcam_shm::Writer>,
+    vcam: Option<vcam::VirtualCamera>,
+    color_fx: ColorCorrector,
+    preview: Option<egui::TextureHandle>,
+    rgba: Vec<u8>,
+    canvas_y: Vec<u8>,
+    canvas_uv: Vec<u8>,
     recording: Option<Recording>,
     dirty: bool,
 }
@@ -78,6 +86,14 @@ impl CamdeskApp {
             notice: String::new(),
             session: None,
             events: None,
+            decoder: None,
+            writer: None,
+            vcam: None,
+            color_fx: ColorCorrector::new(),
+            preview: None,
+            rgba: Vec::new(),
+            canvas_y: Vec::new(),
+            canvas_uv: Vec::new(),
             recording: None,
             dirty: false,
         };
@@ -85,8 +101,8 @@ impl CamdeskApp {
         app
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui) {
-        self.poll();
+    fn ui(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        self.poll(ctx);
         ui.heading("Camdesk");
         ui.label(format!("Estado: {}", self.status));
         if !self.notice.is_empty() {
@@ -101,17 +117,7 @@ impl CamdeskApp {
                 ui.separator();
                 self.record_ui(ui);
             });
-            ui.vertical(|ui| {
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(640.0, 360.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(18, 18, 18));
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "La imagen aparece al conectar",
-                    egui::FontId::proportional(16.0),
-                    egui::Color32::from_rgb(160, 160, 160),
-                );
-            });
+            ui.vertical(|ui| self.preview(ui));
         });
         if self.dirty {
             self.write_config();
@@ -164,6 +170,9 @@ impl CamdeskApp {
             } else if ui.button("Desconectar").clicked() {
                 self.session = None;
                 self.events = None;
+                if let Some(decoder) = self.decoder.as_mut() {
+                    decoder.reset();
+                }
                 self.status = "Desconectado".into();
             }
         });
@@ -313,6 +322,7 @@ impl CamdeskApp {
             self.notice = "La IP no es válida".into();
             return;
         }
+        let warning = self.ensure_pipeline();
         match Session::start(SessionConfig {
             mode,
             resolution: self.resolution,
@@ -323,19 +333,172 @@ impl CamdeskApp {
                 self.session = Some(session);
                 self.events = Some(events);
                 self.status = "Conectando".into();
-                self.notice.clear();
+                self.notice = warning.unwrap_or_default();
             }
             Err(error) => self.notice = error.to_string(),
         }
     }
 
-    fn poll(&mut self) {
-        let Some(events) = self.events.as_ref() else { return };
-        while let Ok(event) = events.try_recv() {
-            if let Event::Status(status) = event {
-                self.status = status_text(status);
+    fn ensure_pipeline(&mut self) -> Option<String> {
+        let mut warning = None;
+        if self.decoder.is_none() {
+            match decode::Decoder::new() {
+                Ok(decoder) => self.decoder = Some(decoder),
+                Err(error) => note(&mut warning, error.to_string()),
             }
         }
+        if self.writer.is_none() {
+            let path = vcam_shm::default_path();
+            match vcam_shm::Writer::create(&path) {
+                Ok(writer) => self.writer = Some(writer),
+                Err(error) if error.raw_os_error() == Some(1224) => match vcam_shm::Writer::open_existing(&path) {
+                    Ok(writer) => self.writer = Some(writer),
+                    Err(error) => note(&mut warning, format!("archivo de la cámara: {error}")),
+                },
+                Err(error) => note(&mut warning, format!("archivo de la cámara: {error}")),
+            }
+        }
+        point_at_vcam_dll();
+        if self.vcam.is_none() {
+            match vcam::VirtualCamera::create() {
+                Ok(camera) => self.vcam = Some(camera),
+                Err(error) => note(&mut warning, error.message),
+            }
+        }
+        if let Some(text) = &warning {
+            app_log(text);
+        }
+        warning
+    }
+
+    fn poll(&mut self, ctx: &egui::Context) {
+        let mut batch = Vec::new();
+        if let Some(events) = self.events.as_ref() {
+            while let Ok(event) = events.try_recv() {
+                batch.push(event);
+            }
+        }
+        let mut latest = None;
+        for event in batch {
+            match event {
+                Event::Status(status) => {
+                    if matches!(status, Status::Conectando) {
+                        if let Some(decoder) = self.decoder.as_mut() {
+                            decoder.reset();
+                        }
+                    }
+                    self.status = status_text(status);
+                }
+                Event::Frame(frame) => {
+                    if let Some(image) = self.push_frame(frame) {
+                        latest = Some(image);
+                    }
+                }
+            }
+        }
+        if let Some(image) = latest {
+            self.publish(ctx, image);
+        }
+    }
+
+    fn push_frame(&mut self, frame: protocol::Frame) -> Option<decode::Decoded> {
+        let decoder = self.decoder.as_mut()?;
+        match decoder.push(&frame) {
+            Ok(image) => image,
+            Err(decode::DecodeError::NeedKeyframe) => {
+                if let Some(session) = &self.session {
+                    session.request_keyframe();
+                }
+                None
+            }
+            Err(decode::DecodeError::Message(text)) => {
+                self.notice = text.clone();
+                app_log(&text);
+                None
+            }
+        }
+    }
+
+    fn publish(&mut self, ctx: &egui::Context, mut decoded: decode::Decoded) {
+        let width = decoded.width as usize;
+        let height = decoded.height as usize;
+        let stride = width.saturating_mul(4);
+        if self.blur_on {
+            let failed = self
+                ._blur_fx
+                .as_mut()
+                .and_then(|fx| fx.apply(&mut decoded.bgra, width, height, stride).err());
+            if let Some(error) = failed {
+                self.blur_on = false;
+                self._blur_fx = None;
+                self.blur_note = error.message.clone();
+                self.notice = error.message;
+            }
+        }
+        self.color_fx.set(self.color);
+        self.color_fx.apply(&mut decoded.bgra, width, height, stride);
+        self.upload_preview(ctx, &decoded);
+        self.write_canvas(&decoded);
+    }
+
+    fn upload_preview(&mut self, ctx: &egui::Context, decoded: &decode::Decoded) {
+        let width = decoded.width as usize;
+        let height = decoded.height as usize;
+        self.rgba.resize(width.saturating_mul(height).saturating_mul(4), 0);
+        for (dst, src) in self.rgba.chunks_exact_mut(4).zip(decoded.bgra.chunks_exact(4)) {
+            dst[0] = src[2];
+            dst[1] = src[1];
+            dst[2] = src[0];
+            dst[3] = 255;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied([width, height], &self.rgba);
+        if let Some(texture) = self.preview.as_mut() {
+            texture.set(image, egui::TextureOptions::LINEAR);
+        } else {
+            self.preview = Some(ctx.load_texture("preview", image, egui::TextureOptions::LINEAR));
+        }
+    }
+
+    fn write_canvas(&mut self, decoded: &decode::Decoded) {
+        self.canvas_y.resize(vcam_shm::Y_BYTES, 16);
+        self.canvas_uv.resize(vcam_shm::UV_BYTES, 128);
+        if let Some(decoder) = self.decoder.as_mut() {
+            decoder.to_canvas_nv12(decoded, &mut self.canvas_y, &mut self.canvas_uv, vcam_shm::STRIDE as usize);
+        }
+        let y = std::mem::take(&mut self.canvas_y);
+        let uv = std::mem::take(&mut self.canvas_uv);
+        if let Some(writer) = self.writer.as_mut() {
+            let _ = writer.write(decoded.pts_us.saturating_mul(10), |dst_y, dst_uv| {
+                if dst_y.len() == y.len() && dst_uv.len() == uv.len() {
+                    dst_y.copy_from_slice(&y);
+                    dst_uv.copy_from_slice(&uv);
+                }
+            });
+        }
+        self.canvas_y = y;
+        self.canvas_uv = uv;
+    }
+
+    fn preview(&self, ui: &mut egui::Ui) {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(640.0, 360.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_rgb(18, 18, 18));
+        let Some(texture) = &self.preview else {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "La imagen aparece al conectar",
+                egui::FontId::proportional(16.0),
+                egui::Color32::from_rgb(160, 160, 160),
+            );
+            return;
+        };
+        let size = texture.size_vec2();
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
+        let scale = (rect.width() / size.x).min(rect.height() / size.y);
+        let fitted = egui::Rect::from_center_size(rect.center(), egui::vec2(size.x * scale, size.y * scale));
+        egui::Image::from_texture(texture).paint_at(ui, fitted);
     }
 
     fn start_recording(&mut self) {
@@ -445,10 +608,64 @@ impl CamdeskApp {
 
 impl eframe::App for CamdeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| self.ui(ui));
-        if self.session.is_some() || self.recording.is_some() {
+        egui::CentralPanel::default().show(ctx, |ui| self.ui(ctx, ui));
+        if self.session.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.recording.is_some() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+    }
+}
+
+fn note(warning: &mut Option<String>, text: String) {
+    match warning {
+        Some(existing) => {
+            existing.push_str(". ");
+            existing.push_str(&text);
+        }
+        None => *warning = Some(text),
+    }
+}
+
+fn point_at_vcam_dll() {
+    if std::env::var_os("CAMDESK_VCAM_DLL").is_some() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(dir) = exe.parent() else { return };
+    let mut best: Option<std::path::PathBuf> = None;
+    let mut consider = |path: std::path::PathBuf| {
+        if !path.is_file() {
+            return;
+        }
+        let replace = match &best {
+            None => true,
+            Some(current) => path.metadata().and_then(|meta| meta.modified()).ok() > current.metadata().and_then(|meta| meta.modified()).ok(),
+        };
+        if replace {
+            best = Some(path);
+        }
+    };
+    consider(dir.join("vcam.dll"));
+    consider(dir.join("..").join("vcam.dll"));
+    if let Ok(entries) = std::fs::read_dir(dir.join("build").join("vcam")) {
+        for entry in entries.flatten() {
+            consider(entry.path().join("out").join("vcam.dll"));
+        }
+    }
+    if let Some(path) = best {
+        std::env::set_var("CAMDESK_VCAM_DLL", path);
+    }
+}
+
+fn app_log(message: &str) {
+    let path = config_path().with_file_name("camdesk.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = std::io::Write::write_all(&mut file, message.as_bytes());
+        let _ = std::io::Write::write_all(&mut file, b"\n");
     }
 }
 

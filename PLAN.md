@@ -140,7 +140,7 @@ pub struct Writer;                 // create(path) -> io::Result; open_existing(
 pub struct Reader;                 // open(path) -> io::Result; read_latest(&mut y, &mut uv) -> Option<FrameInfo>
 // El lector solo hace loads Acquire. No usa InterlockedCompareExchange sobre el mapa de solo lectura.
 
-// vcam (rlib). create() no corre al abrir la ventana: lo llama app en el paso 3.
+// vcam (rlib). create() no corre al abrir la ventana: lo llama app al pulsar Conectar.
 pub struct VcamError { pub message: String }
 pub struct VirtualCamera;          // create() -> Result<Self, VcamError>; Drop = Stop, Remove, Shutdown
 // DLL copiada a %ProgramData%\Camdesk\cellcam.dll, con lectura y ejecución para LOCAL SERVICE.
@@ -269,7 +269,9 @@ Resultados del paso 0, en esta PC (Windows 11 build 26200). El usuario eligió a
 
 El crate `vcam` sigue vacío. El CLSID de `HKLM` no quedó registrado. No quedaron la DLL ni el archivo mapeado en `%ProgramData%\Camdesk` ni en `%ProgramFiles%\Camdesk`. El lector del crate `vcam-shm` no puede usar una operación que escribe sobre el mapeo de solo lectura: es lo que tumbó a Frame Server.
 
-El paso 2 usa ese resultado. La DLL del crate es `IMFMediaSource` en Rust y lee NV12 con `vcam_shm::Reader`. El origen del reloj es la posición de `Start` si viene en `VT_I8`, y si no `MFGetSystemTime()` de ese arranque; cada muestra suma `frame * 1/30 s` y lleva clean point. Se copia a `%ProgramData%\Camdesk\cellcam.dll`. El CLSID `{8F4E2A11-6C3D-4B9E-9170-2A5B8C4D6E11}` queda en `HKLM` después del alta: `Remove` no lo borra, y la siguiente vez no pide administrador. En esta PC, un lector de Media Foundation listó `cellCam (Windows Virtual Camera)` y vio la barra pasar de la columna 200 a la 900. Zoom no está instalado y Meet no se abrió. `app` todavía no llama a `VirtualCamera::create()`.
+El paso 2 usa ese resultado. La DLL del crate es `IMFMediaSource` en Rust y lee NV12 con `vcam_shm::Reader`. El origen del reloj es la posición de `Start` si viene en `VT_I8`, y si no `MFGetSystemTime()` de ese arranque; cada muestra suma `frame * 1/30 s` y lleva clean point. Se copia a `%ProgramData%\Camdesk\cellcam.dll`. El CLSID `{8F4E2A11-6C3D-4B9E-9170-2A5B8C4D6E11}` queda en `HKLM` después del alta: `Remove` no lo borra, y la siguiente vez no pide administrador. En esta PC, un lector de Media Foundation listó `cellCam (Windows Virtual Camera)` y vio la barra pasar de la columna 200 a la 900. Zoom no está instalado y Meet no se abrió.
+
+El paso 3 cablea `app`. Conectar crea el decoder, el archivo mapeado y llama a `VirtualCamera::create()`. Cada frame sigue rotación, desenfoque, color, preview y lienzo NV12. Desconectar cierra la sesión y deja la cámara hasta cerrar la ventana. Abrir la ventana no hace ninguna de esas cargas.
 
 ## Grabación
 

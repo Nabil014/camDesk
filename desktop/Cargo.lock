@@ -575,10 +575,14 @@ dependencies = [
 name = "camdesk"
 version = "0.1.0"
 dependencies = [
+ "decode",
  "eframe",
  "fx",
  "link",
+ "protocol",
  "record",
+ "vcam",
+ "vcam-shm",
 ]
 
 [[package]]

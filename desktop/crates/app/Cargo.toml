@@ -5,6 +5,10 @@ edition = "2021"
 
 [dependencies]
 eframe = "0.31"
+decode = { path = "../decode" }
 fx = { path = "../fx" }
 link = { path = "../link" }
+protocol = { path = "../protocol" }
 record = { path = "../record" }
+vcam = { path = "../vcam" }
+vcam-shm = { path = "../vcam-shm" }
