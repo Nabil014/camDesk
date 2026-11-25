@@ -151,15 +151,20 @@ pub struct VirtualCamera;          // create() -> Result<Self, VcamError>; Drop 
 // La primera vez HKLM pide administrador. Remove no borra esa clave. Sin el archivo mapeado, la cámara entrega negro.
 
 // record — no conoce cellCam
-pub struct MonitorId(pub String);  // índice de monitor, en base 1
+pub struct MonitorId(pub String);  // número de pantalla de Windows (\\.\DISPLAYn)
 pub struct MicId(pub String);
-pub struct MonitorInfo { pub id: MonitorId, pub name: String, pub width: u32, pub height: u32 }
+pub struct OutputId(pub String);   // id del endpoint de reproducción
+pub struct MonitorInfo { pub id: MonitorId, pub name: String, pub width: u32, pub height: u32, pub primary: bool }
+// name es único: «1 · modelo», «2 · modelo».
 pub struct MicInfo { pub id: MicId, pub name: String }
+pub struct OutputInfo { pub id: OutputId, pub name: String }
 pub fn monitors() -> Vec<MonitorInfo>;
+pub fn outputs() -> Vec<OutputInfo>;    // la primera es la predeterminada
 pub fn microphones() -> Vec<MicInfo>;   // el primero es el de comunicaciones por defecto
 pub fn default_output() -> std::path::PathBuf; // Videos\Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4
 pub fn video_encoder_name() -> Result<String, RecordError>; // abre y cierra NVENC, AMF, Quick Sync o h264_mf
-pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub mic: Option<MicId>, pub output: std::path::PathBuf }
+pub struct RecordConfig { pub monitor: MonitorId, pub system_audio: bool, pub system_device: Option<OutputId>, pub mic: Option<MicId>, pub output: std::path::PathBuf }
+// system_device None = la predeterminada. start() falla si la elegida no está.
 pub struct Recording;              // start(cfg) -> Result; elapsed(); encoder(); levels() -> (f32, f32); error(); stop() -> Result<PathBuf>
 ```
 
@@ -286,11 +291,13 @@ El paso 3 cablea `app`. Conectar crea el decoder, el archivo mapeado y llama a `
 
 - Pantalla: `windows-capture` (Windows.Graphics.Capture), monitor elegido en la UI, resolución nativa del monitor.
 - **30 fps constantes.** WGC solo entrega frames cuando cambia la pantalla: si no llega uno a tiempo se repite el último. Si el encode se atrasa, se descarta el frame de pantalla más viejo.
-- Audio del sistema: WASAPI loopback del dispositivo de reproducción por defecto. **El loopback no entrega paquetes en silencio**: el hueco se rellena con ceros según el reloj, si no el audio se corre.
+- Audio del sistema: WASAPI loopback de la salida elegida. Por defecto, «Salida predeterminada». **El loopback no entrega paquetes en silencio**: el hueco se rellena con ceros según el reloj, si no el audio se corre.
 - Micrófono: WASAPI del dispositivo de captura elegido. Por defecto, el de comunicaciones. No se escucha por los parlantes. Mientras se graba, la UI muestra el nivel reciente de cada pista, de silencio a 0 dB; al abrir la ventana esas barras quedan vacías y no se abre WASAPI.
 - Las dos pistas pasan a 48 kHz estéreo float, se suman y se recortan. Cada una se puede apagar.
 - Reloj común: `QueryPerformanceCounter`. Cada pista se alinea a ese reloj; si se corre más de 20 ms, se insertan o descartan muestras.
-- Si cambia el dispositivo por defecto en medio de la grabación, se reabre y el hueco va en silencio. La grabación no se corta.
+- Con «Salida predeterminada», si cambia el dispositivo por defecto en medio de la grabación, se reabre y el hueco va en silencio. Una salida elegida a mano no sigue a la predeterminada: si se desconecta, esa pista queda en silencio y se vuelve a buscar cada 500 ms. La grabación no se corta. Si al pulsar Grabar la elegida no está, no se graba y el aviso lo dice.
+- La elección se guarda en la config (`system_device`, `system_device_name`). El nombre guardado se muestra sin abrir WASAPI; la lista se arma al desplegarla. No cambia lo que suena en la PC y no se puede cambiar durante una grabación.
+- Los monitores se listan numerados, con su tamaño y «(principal)» en el principal. Se recuerdan por número y tamaño (`monitor_id`, `monitor`).
 - Salida: carpeta Videos del usuario (`FOLDERID_Videos`) + `Camdesk\grabacion-YYYYMMDD-HHMMSS.mp4`.
 - **MP4 fragmentado** (`frag_keyframe+empty_moov+default_base_moof`) para que un cuelgue no deje el archivo ilegible.
 - Encoder de video, en este orden: NVENC, AMF, Quick Sync, `h264_mf`. `h264_mf` ya cae al encoder de software de Windows; no se usa `libx264`. Mientras se graba, el pie muestra ese encoder y «30 fps», al lado del tiempo REC. Si no hay imagen del teléfono, la vista previa dice que sigue vacía y el epígrafe dice que cellCam permanece en negro. Al detener, el aviso dice «Grabación guardada» y, al lado, la ruta del MP4. Mientras se graba sin teléfono, el aviso dice «Grabando sin cámara» y que la grabación es otro trabajo. Con el teléfono en vivo, dice «Grabando» con el tiempo y que graba el monitor.
@@ -320,7 +327,7 @@ Español. Controles de la primera versión:
 - Selector Rotación. Automática aplica los metadatos del teléfono; 0°, 90°, 180° o 270° fijan el ángulo para la preview y la cámara virtual. Se puede cambiar en vivo y se guarda en la configuración.
 - Estado: conectando, en vivo, desconectado, ocupado (otro cliente conectado al teléfono), teléfono no autorizado (aceptar la depuración USB), versión incompatible.
 - Efectos: casilla "Desenfocar fondo" y su fuerza (deshabilitada con el motivo si no hay RTX o runtime). Sliders de brillo, contraste, saturación y temperatura, y botón Restablecer.
-- Monitor, casillas de audio del sistema y de micrófono, desplegable de micrófono.
+- Monitor, casillas de audio del sistema y de micrófono, desplegable de salida de audio y de micrófono.
 - Grabar / Detener y el tiempo transcurrido.
 
 Diseño vigente: «Camdesk — consola oscura, inspirada en OBS» (lienzo «Camdesk UI»); reemplaza a `docs/camdesk-ux.html`. De arriba abajo: barra con la marca; vista previa en un marco 16:9 con las marcas EN VIVO, REC y «Último cuadro», y el epígrafe debajo; cuatro docks (Conexión, Efectos, Grabación, Controles); pie con el estado, el formato de la cámara y, al grabar, el tiempo y el encoder. Los avisos van en el dock Controles, no arriba. Los tokens están en `app/src/theme.rs`: un solo acento azul para acciones; verde, ámbar y rojo solo para estado. Los controles pintados a mano están en `app/src/widgets.rs` y declaran nombre y estado para el lector de pantalla. Fuentes: Inter y JetBrains Mono si están instaladas en Windows; si no, Segoe UI y Cascadia Mono. No se empaquetan fuentes. La ventana abre en 1280×800 y no baja de 1060×640; en una ventana baja los docks se desplazan.
@@ -374,5 +381,7 @@ Hilo de video (`camdesk-video`), 25/11/2026, teléfono `e5c31a82` por USB en mod
 - La versión anterior, con todo en el hilo de egui, también sostenía unos 30 fps minimizada y unos 27 fps con la ventana en el bucle de mover (`SC_MOVE`). Minimizar no la frenaba.
 - Lo que sí cambió es Cancelar. Con Solo Wi-Fi a `192.0.2.1`, tres veces Conectar y Cancelar: la anterior dejó la ventana sin responder hasta 6,3 s (vueltas de 6286, 509 y 118 ms) y la nueva vuelve en 27 a 45 ms.
 - Se usó la config de siempre y la DLL de cámara ya instalada (`CAMDESK_VCAM_DLL`). Al final se restauró la config automática sin IP y el forward `e5c31a82 tcp:4747`.
+
+Salidas y monitores, 25/11/2026, dos salidas (Altavoces, predeterminada, y «Realtek HD Audio 2nd output») y dos monitores del mismo modelo. Con un tono de 1 kHz solo en «2nd output»: eligiendo esa salida el MP4 trae el tono (total −10,0 dB, banda de 1 kHz −10,1 dB); eligiendo Altavoces o la predeterminada no (banda de 1 kHz entre −47,7 y −45,9 dB, con otro audio sonando). Cada monitor grabó su tamaño: «1 · 18.5 monitor» 1360×768 y «2 · 18.5 monitor» 1920×1080. Una salida inexistente no arranca la grabación. Encoder `h264_nvenc`.
 
 El selector Frontal no está en la lista numerada. Con ese valor el estado fue En vivo 1280x720 y el cuadro siguió siendo el de la trasera: la misma persona y el mismo techo, diferencia media 1 sobre 255. cellCam abre siempre la cámara trasera. El lienzo siguió en 1920x1080. Camdesk ahora usa la cámara de la respuesta: el aviso dice «El teléfono se quedó en la cámara trasera», el selector vuelve a Trasera y la config queda en `camera=back`.

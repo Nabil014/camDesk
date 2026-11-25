@@ -21,7 +21,7 @@ use protocol::Rotation;
 use theme::Tone;
 use video::{Command, Report, Video};
 use widgets::{Action, Icon};
-use record::{MicId, MonitorId, RecordConfig, Recording, default_output, microphones, monitors};
+use record::{MicId, MonitorId, OutputId, RecordConfig, Recording, default_output, microphones, monitors, outputs};
 
 fn main() -> eframe::Result<()> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/camdesk.png"))
@@ -71,6 +71,12 @@ struct CamdeskApp {
     monitor: Option<MonitorId>,
     monitor_size: Option<(u32, u32)>,
     mic: Option<MicId>,
+    /// Salida de audio que se graba. `None` es la predeterminada de Windows.
+    system_device: Option<OutputId>,
+    /// Nombre guardado, para mostrarlo sin abrir WASAPI al arrancar.
+    system_device_name: String,
+    outputs: Vec<record::OutputInfo>,
+    outputs_listed: bool,
     status: String,
     live_transport: Option<Transport>,
     notice: String,
@@ -116,6 +122,10 @@ impl CamdeskApp {
             monitor: None,
             monitor_size: None,
             mic: None,
+            system_device: None,
+            system_device_name: String::new(),
+            outputs: Vec::new(),
+            outputs_listed: false,
             status: "Desconectado".into(),
             live_transport: None,
             notice: String::new(),
@@ -369,6 +379,7 @@ impl CamdeskApp {
         let level = if self.system_audio { self.meter_level(true) } else { 0.0 };
         self.dirty |= widgets::checkbox(ui, &mut self.system_audio, "Audio del sistema", Icon::Speaker, &level_db(level)).changed();
         widgets::level_meter(ui, level);
+        self.output_picker(ui);
         ui.add_space(6.0);
         let level = if self.mic_on { self.meter_level(false) } else { 0.0 };
         self.dirty |= widgets::checkbox(ui, &mut self.mic_on, "Micrófono", Icon::Mic, &level_db(level)).changed();
@@ -406,6 +417,44 @@ impl CamdeskApp {
                 .font(theme::body(11.0))
                 .color(theme::MUTED),
         );
+    }
+
+    /// Qué salida de reproducción entra en la grabación. No cambia lo que suena en la PC.
+    fn output_picker(&mut self, ui: &mut egui::Ui) {
+        let recording = self.recording.is_some();
+        let label = match &self.system_device {
+            Some(_) => self.system_device_name.clone(),
+            None => DEFAULT_OUTPUT.into(),
+        };
+        ui.add_enabled_ui(self.system_audio && !recording, |ui| {
+            let combo = egui::ComboBox::from_id_salt("salida")
+                .width(ui.available_width())
+                .truncate()
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    // Se enumera al desplegar: antes no se abre WASAPI, y así aparece lo recién enchufado.
+                    if !self.outputs_listed {
+                        self.outputs = outputs();
+                        self.outputs_listed = true;
+                    }
+                    if ui.selectable_label(self.system_device.is_none(), DEFAULT_OUTPUT).clicked() {
+                        self.system_device = None;
+                        self.system_device_name.clear();
+                        self.dirty = true;
+                    }
+                    for item in &self.outputs {
+                        let selected = self.system_device.as_ref() == Some(&item.id);
+                        if ui.selectable_label(selected, &item.name).clicked() {
+                            self.system_device = Some(item.id.clone());
+                            self.system_device_name = item.name.clone();
+                            self.dirty = true;
+                        }
+                    }
+                });
+            if combo.inner.is_none() {
+                self.outputs_listed = false;
+            }
+        });
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -836,12 +885,7 @@ impl CamdeskApp {
     }
 
     fn picked_monitor(&self) -> Option<MonitorId> {
-        if let Some((width, height)) = self.monitor_size {
-            if let Some(item) = self.monitors.iter().find(|item| item.width == width && item.height == height) {
-                return Some(item.id.clone());
-            }
-        }
-        self.monitors.first().map(|item| item.id.clone())
+        pick_monitor(&self.monitors, self.monitor.as_ref(), self.monitor_size)
     }
 
     fn meter_level(&self, system: bool) -> f32 {
@@ -881,6 +925,7 @@ impl CamdeskApp {
         match Recording::start(RecordConfig {
             monitor,
             system_audio: self.system_audio,
+            system_device: self.system_device.clone(),
             mic,
             output: output.clone(),
         }) {
@@ -940,6 +985,13 @@ impl CamdeskApp {
                 "blur" => self.blur_strength = value.trim().parse().unwrap_or(0.5),
                 "system_audio" => self.system_audio = value.trim() != "0",
                 "mic" => self.mic_on = value.trim() != "0",
+                "system_device" => {
+                    self.system_device = Some(value.trim()).filter(|id| !id.is_empty()).map(|id| OutputId(id.to_string()));
+                }
+                "system_device_name" => self.system_device_name = value.trim().to_string(),
+                "monitor_id" => {
+                    self.monitor = Some(value.trim()).filter(|id| !id.is_empty()).map(|id| MonitorId(id.to_string()));
+                }
                 "monitor" => {
                     self.monitor_size = value.trim().split_once('x').and_then(|(width, height)| {
                         Some((width.parse().ok()?, height.parse().ok()?))
@@ -961,7 +1013,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -983,6 +1035,10 @@ impl CamdeskApp {
                 Some((width, height)) => format!("{width}x{height}"),
                 None => String::new(),
             },
+            // El número solo vale junto con el tamaño elegido: sin elección no se guarda.
+            self.monitor_size.and(self.monitor.as_ref()).map_or("", |id| id.0.as_str()),
+            self.system_device.as_ref().map_or("", |id| id.0.as_str()),
+            self.system_device_name,
         );
         let _ = std::fs::write(path, text);
     }
@@ -1060,6 +1116,8 @@ impl eframe::App for CamdeskApp {
         }
     }
 }
+
+const DEFAULT_OUTPUT: &str = "Salida predeterminada";
 
 const LAST_FRAME: &str = "Último cuadro\nZoom se quedó en esta imagen. La cámara virtual no pasa a negro.";
 
@@ -1170,7 +1228,18 @@ fn app_log(message: &str) {
 }
 
 fn monitor_text(item: &record::MonitorInfo) -> String {
-    format!("{} {}x{}", item.name, item.width, item.height)
+    let primary = if item.primary { " (principal)" } else { "" };
+    format!("{} {}x{}{primary}", item.name, item.width, item.height)
+}
+
+/// El elegido antes, si sigue con el mismo tamaño; si no, otro de ese tamaño; si no, el primero.
+fn pick_monitor(list: &[record::MonitorInfo], id: Option<&MonitorId>, size: Option<(u32, u32)>) -> Option<MonitorId> {
+    let sized = |item: &&record::MonitorInfo| size == Some((item.width, item.height));
+    list.iter()
+        .find(|item| Some(&item.id) == id && sized(item))
+        .or_else(|| list.iter().find(sized))
+        .or_else(|| list.first())
+        .map(|item| item.id.clone())
 }
 
 fn status_text(status: Status) -> String {
@@ -1214,4 +1283,28 @@ fn config_path() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     base.join("Camdesk").join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(id: &str, width: u32, height: u32, primary: bool) -> record::MonitorInfo {
+        record::MonitorInfo { id: MonitorId(id.into()), name: format!("{id} · Panel"), width, height, primary }
+    }
+
+    #[test]
+    fn dos_monitores_iguales_se_recuerdan_por_numero() {
+        let list = [monitor("1", 1920, 1080, true), monitor("2", 1920, 1080, false)];
+        let second = MonitorId("2".into());
+        assert_eq!(pick_monitor(&list, Some(&second), Some((1920, 1080))), Some(second.clone()));
+        // Config vieja, sin número: el primero de ese tamaño.
+        assert_eq!(pick_monitor(&list, None, Some((1920, 1080))), Some(MonitorId("1".into())));
+        // El número guardado ahora es otra pantalla: manda el tamaño.
+        let mixed = [monitor("1", 1920, 1080, true), monitor("2", 1360, 768, false)];
+        assert_eq!(pick_monitor(&mixed, Some(&second), Some((1920, 1080))), Some(MonitorId("1".into())));
+        assert_eq!(pick_monitor(&[], Some(&second), None), None);
+        assert_eq!(monitor_text(&list[0]), "1 · Panel 1920x1080 (principal)");
+        assert_eq!(monitor_text(&list[1]), "2 · Panel 1920x1080");
+    }
 }

@@ -39,12 +39,24 @@ pub struct MonitorId(pub String);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MicId(pub String);
 
+/// Salida de reproducción cuyo sonido se puede grabar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputId(pub String);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
     pub id: MonitorId,
+    /// Único en la lista: lleva un número delante aunque dos pantallas sean del mismo modelo.
     pub name: String,
     pub width: u32,
     pub height: u32,
+    pub primary: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputInfo {
+    pub id: OutputId,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +69,8 @@ pub struct MicInfo {
 pub struct RecordConfig {
     pub monitor: MonitorId,
     pub system_audio: bool,
+    /// Salida que se graba. `None` es la predeterminada de Windows, y la sigue si cambia.
+    pub system_device: Option<OutputId>,
     pub mic: Option<MicId>,
     pub output: PathBuf,
 }
@@ -83,20 +97,56 @@ pub fn monitors() -> Vec<MonitorInfo> {
         Ok(list) => list,
         Err(_) => return Vec::new(),
     };
-    list.into_iter()
-        .filter_map(|monitor| {
-            let index = monitor.index().ok()?;
-            let name = monitor.name().unwrap_or_else(|_| format!("Monitor {index}"));
-            let width = monitor.width().unwrap_or(0);
-            let height = monitor.height().unwrap_or(0);
-            Some(MonitorInfo {
-                id: MonitorId(index.to_string()),
-                name,
-                width,
-                height,
-            })
+    let primary = Monitor::primary().ok();
+    let mut found: Vec<(usize, Monitor)> = list
+        .into_iter()
+        .filter_map(|monitor| Some((monitor.index().ok()?, monitor)))
+        .collect();
+    found.sort_by_key(|(index, _)| *index);
+    found
+        .into_iter()
+        .enumerate()
+        .map(|(position, (index, monitor))| MonitorInfo {
+            id: MonitorId(index.to_string()),
+            name: monitor_name(position + 1, monitor.name().ok()),
+            width: monitor.width().unwrap_or(0),
+            height: monitor.height().unwrap_or(0),
+            primary: primary == Some(monitor),
         })
         .collect()
+}
+
+/// Windows da el nombre del modelo: dos pantallas iguales quedarían idénticas sin el número.
+fn monitor_name(number: usize, model: Option<String>) -> String {
+    match model.as_deref().map(str::trim) {
+        Some(model) if !model.is_empty() => format!("{number} · {model}"),
+        _ => format!("{number} · Monitor"),
+    }
+}
+
+/// Salidas de reproducción activas. La predeterminada va primero.
+pub fn outputs() -> Vec<OutputInfo> {
+    let _ = initialize_mta();
+    let collection = match DeviceCollection::new(&Direction::Render) {
+        Ok(collection) => collection,
+        Err(_) => return Vec::new(),
+    };
+    let preferred = default_render_id();
+    let count = collection.get_nbr_devices().unwrap_or(0);
+    let mut list = Vec::new();
+    for index in 0..count {
+        let Ok(device) = collection.get_device_at_index(index) else { continue };
+        let Ok(id) = device.get_id() else { continue };
+        let name = device.get_friendlyname().unwrap_or_else(|_| id.clone());
+        list.push(OutputInfo { id: OutputId(id), name });
+    }
+    if let Some(preferred) = preferred {
+        if let Some(pos) = list.iter().position(|item| item.id.0 == preferred) {
+            let item = list.remove(pos);
+            list.insert(0, item);
+        }
+    }
+    list
 }
 
 pub fn microphones() -> Vec<MicInfo> {
@@ -174,6 +224,13 @@ impl Recording {
             .into_iter()
             .find(|item| item.id == cfg.monitor)
             .ok_or_else(|| err("no está ese monitor"))?;
+        if cfg.system_audio {
+            if let Some(device) = &cfg.system_device {
+                if !outputs().iter().any(|item| item.id == *device) {
+                    return Err(err("la salida de audio elegida no está conectada"));
+                }
+            }
+        }
         if let Some(parent) = cfg.output.parent() {
             std::fs::create_dir_all(parent).map_err(|error| err(error.to_string()))?;
         }
@@ -188,12 +245,14 @@ impl Recording {
         let failure_thread = failure.clone();
         let levels_thread = levels.clone();
         let system_audio = cfg.system_audio;
+        let system_device = cfg.system_device.map(|id| id.0);
         let mic = cfg.mic.clone();
         let monitor_id = cfg.monitor.0.clone();
         let join = std::thread::Builder::new()
             .name("camdesk-record".into())
             .spawn(move || {
-                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, system_audio, mic, levels_thread) {
+                let sound = Sound { system: system_audio, system_device, mic: mic.map(|id| id.0) };
+                if let Err(error) = run(mux, stop_thread, &monitor_id, width, height, sound, levels_thread) {
                     *failure_thread.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(error.clone());
                     return Err(error);
                 }
@@ -291,18 +350,29 @@ impl GraphicsCaptureApiHandler for Screen {
     }
 }
 
+/// Qué fuentes de audio entran en la grabación.
+struct Sound {
+    system: bool,
+    system_device: Option<String>,
+    mic: Option<String>,
+}
+
 fn run(
     mut mux: Mux,
     stop: Arc<AtomicBool>,
     monitor_id: &str,
     width: u32,
     height: u32,
-    system_audio: bool,
-    mic: Option<MicId>,
+    sound: Sound,
     levels: Arc<Levels>,
 ) -> Result<(), String> {
     let index: usize = monitor_id.parse().map_err(|_| "el monitor no tiene índice".to_string())?;
-    let monitor = Monitor::from_index(index).map_err(|error| error.to_string())?;
+    // `from_index` toma la posición en la enumeración, que no tiene por qué ser el número de pantalla.
+    let monitor = Monitor::enumerate()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|monitor| monitor.index().ok() == Some(index))
+        .ok_or_else(|| "no está ese monitor".to_string())?;
     let latest = Arc::new(Mutex::new(None));
     let settings = Settings::new(
         monitor,
@@ -321,10 +391,9 @@ fn run(
     }));
     let audio_stop = stop.clone();
     let audio_slot = audio.clone();
-    let mic_id = mic.map(|id| id.0);
     let audio_thread = std::thread::Builder::new()
         .name("camdesk-audio".into())
-        .spawn(move || audio_loop(audio_stop, audio_slot, system_audio, mic_id, levels))
+        .spawn(move || audio_loop(audio_stop, audio_slot, sound, levels))
         .map_err(|error| error.to_string())?;
 
     let freq = qpc_freq();
@@ -445,25 +514,27 @@ struct OpenCapture {
     id: String,
 }
 
-fn audio_loop(
-    stop: Arc<AtomicBool>,
-    slot: Arc<Mutex<SharedAudio>>,
-    system_audio: bool,
-    mic: Option<String>,
-    levels: Arc<Levels>,
-) {
+fn audio_loop(stop: Arc<AtomicBool>, slot: Arc<Mutex<SharedAudio>>, sound: Sound, levels: Arc<Levels>) {
+    let Sound { system: system_audio, system_device, mic } = sound;
     let _ = initialize_mta();
+    // Una salida elegida que se desconecta no se busca en cada vuelta: enumerar cuesta.
+    let mut retry_at = Instant::now();
     let mut loopback: Option<OpenCapture> = None;
     let mut microphone: Option<OpenCapture> = None;
     let mut scratch = vec![0u8; 16_384];
     while !stop.load(Ordering::Acquire) {
         if system_audio {
             if loopback.is_none() {
-                loopback = open_loopback().ok();
-            } else if let Some(current) = loopback.as_ref() {
+                if Instant::now() >= retry_at {
+                    loopback = open_loopback(system_device.as_deref()).ok();
+                    retry_at = Instant::now() + Duration::from_millis(500);
+                }
+            } else if let (None, Some(current)) = (&system_device, loopback.as_ref()) {
+                // Solo la predeterminada se sigue: una salida elegida a mano no cambia sola.
                 if let Some(default) = default_render_id() {
                     if default != current.id {
                         loopback = None;
+                        retry_at = Instant::now();
                         continue;
                     }
                 }
@@ -535,28 +606,32 @@ fn note_level(slot: &AtomicU32, samples: &[f32]) {
     slot.store(next.to_bits(), Ordering::Relaxed);
 }
 
-fn open_loopback() -> Result<OpenCapture, wasapi::WasapiError> {
-    let device = get_default_device(&Direction::Render)?;
+fn open_loopback(chosen: Option<&str>) -> Result<OpenCapture, wasapi::WasapiError> {
+    let device = match chosen {
+        Some(id) => find_device(&Direction::Render, id)?,
+        None => get_default_device(&Direction::Render)?,
+    };
     let id = device.get_id()?;
     let capture = start_capture(&device, &Direction::Capture)?;
     Ok(OpenCapture { client: capture.0, capture: capture.1, id })
 }
 
 fn open_mic(id: &str) -> Result<OpenCapture, wasapi::WasapiError> {
-    let collection = DeviceCollection::new(&Direction::Capture)?;
+    let device = find_device(&Direction::Capture, id)?;
+    let capture = start_capture(&device, &Direction::Capture)?;
+    Ok(OpenCapture { client: capture.0, capture: capture.1, id: id.to_string() })
+}
+
+fn find_device(direction: &Direction, id: &str) -> Result<wasapi::Device, wasapi::WasapiError> {
+    let collection = DeviceCollection::new(direction)?;
     let count = collection.get_nbr_devices()?;
     for index in 0..count {
         let device = collection.get_device_at_index(index)?;
         if device.get_id()? == id {
-            let capture = start_capture(&device, &Direction::Capture)?;
-            return Ok(OpenCapture {
-                client: capture.0,
-                capture: capture.1,
-                id: id.to_string(),
-            });
+            return Ok(device);
         }
     }
-    Err(wasapi::WasapiError::UnsupportedFormat)
+    Err(wasapi::WasapiError::DeviceNotFound(id.to_string()))
 }
 
 fn start_capture(
@@ -647,6 +722,7 @@ fn graba_un_segundo() {
     let recording = Recording::start(RecordConfig {
         monitor: monitor.id,
         system_audio: true,
+        system_device: None,
         mic: None,
         output: output.clone(),
     })
@@ -680,6 +756,16 @@ fn graba_un_segundo() {
     assert!(audio_s > 0.8 && video_s > 0.8, "duración video={video_s} audio={audio_s}");
     assert!((video_s - audio_s).abs() < 0.5, "el video no acompaña al audio: {video_s} vs {audio_s}");
     let _ = std::fs::remove_file(&output);
+}
+
+#[test]
+fn dos_pantallas_del_mismo_modelo_tienen_nombres_distintos() {
+    let first = monitor_name(1, Some("18.5 monitor".into()));
+    let second = monitor_name(2, Some("18.5 monitor".into()));
+    assert_eq!(first, "1 · 18.5 monitor");
+    assert_ne!(first, second);
+    assert_eq!(monitor_name(3, Some("  ".into())), "3 · Monitor");
+    assert_eq!(monitor_name(1, None), "1 · Monitor");
 }
 
 #[test]
