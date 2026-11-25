@@ -1,5 +1,6 @@
-//! Ventana de Camdesk. Al abrir no carga FFmpeg, no registra la cámara virtual,
-//! no crea el archivo mapeado, no corre adb, no abre WASAPI y no captura la pantalla.
+//! Ventana de Camdesk. Al abrir no carga FFmpeg, no carga el runtime de NVIDIA,
+//! no registra la cámara virtual, no crea el archivo mapeado, no corre adb,
+//! no abre WASAPI y no captura la pantalla.
 
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -434,6 +435,8 @@ impl CamdeskApp {
                 self._blur_fx = None;
                 self.blur_note = error.message.clone();
                 self.notice = error.message;
+            } else if let Some(note) = self._blur_fx.as_ref().and_then(|fx| fx.notice()) {
+                self.blur_note = note.to_string();
             }
         }
         self.color_fx.set(self.color);

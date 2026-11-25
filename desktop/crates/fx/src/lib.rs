@@ -3,6 +3,9 @@
 
 use std::fmt;
 
+#[cfg(windows)]
+mod nvidia;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorParams {
     pub brightness: f32,
@@ -152,9 +155,12 @@ pub fn blur_availability() -> BlurAvailability {
 
 pub struct BackgroundBlur {
     strength: f32,
+    #[cfg(windows)]
+    engine: nvidia::Engine,
 }
 
 impl BackgroundBlur {
+    /// Carga el runtime y los modelos. Falla si esta máquina no puede desenfocar.
     pub fn new() -> Result<Self, FxError> {
         match blur_availability() {
             BlurAvailability::NoRuntime => {
@@ -165,25 +171,46 @@ impl BackgroundBlur {
             }
             BlurAvailability::Available => {}
         }
-        // El chequeo definitivo (RTX, driver, modelos) ocurre al cargar el runtime.
-        // Cargarlo y dejarlo a medias corrompe el frame: si Load no está listo, se apaga.
-        Err(FxError {
-            message: "el runtime está instalado, pero este build todavía no corre GreenScreen".into(),
-        })
+        #[cfg(windows)]
+        {
+            return Ok(Self { strength: 0.5, engine: nvidia::Engine::start()? });
+        }
+        #[cfg(not(windows))]
+        Err(FxError { message: "el desenfoque solo corre en Windows".into() })
     }
 
     pub fn set_strength(&mut self, strength: f32) {
         self.strength = strength.clamp(0.0, 1.0);
+        #[cfg(windows)]
+        self.engine.set_strength(self.strength);
     }
 
-    pub fn apply(&mut self, _bgra: &mut [u8], _width: usize, _height: usize, _stride: usize) -> Result<(), FxError> {
-        let _ = self.strength;
-        Err(FxError { message: "desenfoque apagado".into() })
+    /// Aviso que no apaga el efecto, como el paso a modo rendimiento.
+    pub fn notice(&self) -> Option<&str> {
+        #[cfg(windows)]
+        {
+            return self.engine.notice();
+        }
+        #[cfg(not(windows))]
+        None
+    }
+
+    /// Desenfoca el fondo del BGRA. `stride` es el paso de una fila, en bytes.
+    pub fn apply(&mut self, bgra: &mut [u8], width: usize, height: usize, stride: usize) -> Result<(), FxError> {
+        #[cfg(windows)]
+        {
+            return self.engine.apply(bgra, width, height, stride);
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (bgra, width, height, stride, self.strength);
+            Err(FxError { message: "desenfoque apagado".into() })
+        }
     }
 }
 
 #[cfg(windows)]
-fn runtime_dll() -> Option<std::path::PathBuf> {
+pub(crate) fn runtime_dll() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("NV_VIDEO_EFFECTS_PATH") {
         let path = std::path::PathBuf::from(dir).join("NVVideoEffects.dll");
         if path.is_file() {
@@ -246,6 +273,62 @@ mod tests {
             assert_eq!(pixels[3], 255);
             assert_eq!(pixels[7], 255);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "carga el runtime de NVIDIA; no forma parte de cargo test"]
+    fn desenfoque_en_esta_gpu() {
+        let mut fx = BackgroundBlur::new().expect("el runtime no arrancó");
+        fx.set_strength(0.8);
+        let (width, height) = (1280usize, 720usize);
+        let mut bgra = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * width + x) * 4;
+                bgra[i] = (x % 256) as u8;
+                bgra[i + 1] = (y % 256) as u8;
+                bgra[i + 2] = 40;
+                bgra[i + 3] = 255;
+            }
+        }
+        let before = bgra.clone();
+        let mut steady = std::time::Duration::ZERO;
+        let samples = 20u32;
+        for n in 0..samples {
+            let started = std::time::Instant::now();
+            fx.apply(&mut bgra, width, height, width * 4).expect("apply");
+            if n >= 2 {
+                steady += started.elapsed();
+            }
+        }
+        let avg = steady / (samples - 2);
+        let mut delta = 0u64;
+        for (a, b) in before.chunks_exact(4).zip(bgra.chunks_exact(4)) {
+            delta += a[0].abs_diff(b[0]) as u64;
+            delta += a[1].abs_diff(b[1]) as u64;
+            delta += a[2].abs_diff(b[2]) as u64;
+        }
+        let mad = delta as f64 / (width * height * 3) as f64;
+        eprintln!("mad={mad:.2} avg720={avg:?} notice={:?}", fx.notice());
+        assert!(mad > 2.0, "el cambio parece una conversión, no un desenfoque");
+        let mut hd = vec![0u8; 1920 * 1080 * 4];
+        for (i, px) in hd.chunks_exact_mut(4).enumerate() {
+            px[0] = (i % 251) as u8;
+            px[1] = ((i / 3) % 251) as u8;
+            px[2] = 90;
+            px[3] = 255;
+        }
+        let t = std::time::Instant::now();
+        fx.apply(&mut hd, 1920, 1080, 1920 * 4).expect("1080");
+        let load = t.elapsed();
+        let mut hd_steady = std::time::Duration::ZERO;
+        for _ in 0..8 {
+            let t = std::time::Instant::now();
+            fx.apply(&mut hd, 1920, 1080, 1920 * 4).expect("1080");
+            hd_steady += t.elapsed();
+        }
+        eprintln!("load1080={load:?} avg1080={:?}", hd_steady / 8);
     }
 
     #[test]

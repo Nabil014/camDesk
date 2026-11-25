@@ -129,8 +129,8 @@ pub struct ColorCorrector;         // new(); set(ColorParams); apply(bgra: &mut 
 pub enum BlurAvailability { Available, NoNvidiaGpu, NoRuntime }
 pub fn blur_availability() -> BlurAvailability;  // chequeo liviano, no carga el runtime
 pub struct FxError { pub message: String }
-pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(...) -> Result<(), FxError>
-// new() sigue fallando a propósito si el runtime está: este build todavía no corre GreenScreen.
+pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(...) -> Result<(), FxError>; notice() -> Option<&str>
+// notice() avisa sin apagar el efecto, por ejemplo al pasar a modo rendimiento.
 
 // vcam-shm
 pub const WIDTH: u32 = 1920; pub const HEIGHT: u32 = 1080; pub const STRIDE: u32 = 1920;
@@ -348,6 +348,6 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado y Meet no 
 7. Grabación de 30 min (`Videos\Camdesk\grabacion-20261125-010534.mp4`), encoder `h264_nvenc`, 1360x768. El MP4 dura 29:59,77. Video 1799,67 s a 30 fps y audio 1799,76 s (92 ms de diferencia). En el minuto 10 el cuadro está quieto y el audio está en silencio (−70 dB). Un tono de 1 kHz al final empieza en 1739,668 s y el cuadro pasa de rojo a verde en 1739,667 s. No se usó Zoom.
 8. Por Wi-Fi a `192.168.1.37`, en vivo 1280x720. Al apagar el Wi-Fi del teléfono el estado pasó a Desconectado y el cuadro mapeado quedó quieto (secuencia 42). Al encenderlo, la IP volvió a ser `192.168.1.37` y unos 4 s después la secuencia siguió (56). Antes de ese arreglo, un corte que no cerraba el socket dejaba el estado en En vivo y no reintentaba. OBS estaba usando el único cliente y se lo pausó solo durante la prueba. No se miró en Zoom.
 9. El handle de la ventana apareció en cerca de 1,1 s. Antes de Conectar no estaban cargadas `avcodec`, `swscale` ni el runtime de NVIDIA. Después de Conectar sí se cargan `avcodec-62.dll`, `avutil-60.dll` y `swscale-9.dll`.
-10. Hay una RTX 4060 y el runtime de NVIDIA Video Effects. La casilla se puede marcar y se apaga sola con el texto "el runtime está instalado, pero este build todavía no corre GreenScreen".
+10. RTX 4060 y runtime NVIDIA Video Effects 0.7.6. `BackgroundBlur::new` carga `GreenScreen` y `BackgroundBlur` en modo calidad. En un cuadro sintético de 1280x720 el efecto cambia la imagen (diferencia media 31) y tarda unos 5,5 ms; a 1920x1080, unos 7,7 ms. No hizo falta pasar a modo rendimiento. El teléfono estaba bloqueado y cellCam no estaba en marcha, así que no se vio en la preview ni al girar el teléfono. Zoom no está instalado.
 11. En esta PC la casilla no queda deshabilitada, porque la GPU y el runtime están.
 12. Sin imagen no se vieron los sliders en la preview ni en Zoom. El brillo 0,35 quedó en `%LOCALAPPDATA%\Camdesk\config.toml` y al reabrir la ventana el control vuelve en 0,35.
