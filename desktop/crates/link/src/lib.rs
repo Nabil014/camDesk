@@ -304,6 +304,11 @@ fn talk(
     let mut parser = FrameParser::new();
     let mut buf = [0u8; 8192];
     let mut skip_until_key = false;
+    // Si el Wi-Fi se corta, el socket no siempre se cierra: las lecturas solo
+    // vencen. Sin bytes durante este rato el enlace está muerto y se reintenta.
+    // El último cuadro queda en quien ya lo tenía.
+    let silence = Duration::from_secs(2);
+    let mut last_byte = Instant::now();
     loop {
         if stop.load(Ordering::Acquire) {
             return Attempt::Stop;
@@ -315,8 +320,15 @@ fn talk(
         }
         match stream.read(&mut buf) {
             Ok(0) => return Attempt::Again(Status::Desconectado),
-            Ok(n) => parser.push(&buf[..n]),
-            Err(err) if err.kind() == std::io::ErrorKind::TimedOut || err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(n) => {
+                last_byte = Instant::now();
+                parser.push(&buf[..n]);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::TimedOut || err.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_byte.elapsed() >= silence {
+                    return Attempt::Again(Status::Desconectado);
+                }
+            }
             Err(_) => return Attempt::Again(Status::Desconectado),
         }
         while let Some(item) = parser.next() {
@@ -475,6 +487,22 @@ mod tests {
         let Event::Frame(frame) = event else { unreachable!() };
         assert_eq!(frame.payload, vec![1, 2, 3]);
         assert!(frame.header.keyframe);
+    }
+
+    #[test]
+    fn silencio_prolongado_desconecta() {
+        let server = Server::spawn(|mut stream| {
+            let _ = read_handshake(&mut stream);
+            stream.write_all(&handshake_ok(1280, 720)).unwrap();
+            stream.write_all(&video_frame(&[7])).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+        let (_session, rx) = session(server.port);
+        recv_until(&rx, |ev| matches!(ev, Event::Status(Status::EnVivo { .. })));
+        recv_until(&rx, |ev| matches!(ev, Event::Frame(_)));
+        let started = Instant::now();
+        recv_until(&rx, |ev| matches!(ev, Event::Status(Status::Desconectado)));
+        assert!(started.elapsed() < Duration::from_secs(3), "no notó el silencio");
     }
 
     #[test]
