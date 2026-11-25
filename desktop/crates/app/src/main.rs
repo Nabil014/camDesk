@@ -40,6 +40,7 @@ struct CamdeskApp {
     monitors: Vec<record::MonitorInfo>,
     mics: Vec<record::MicInfo>,
     monitor: Option<MonitorId>,
+    monitor_size: Option<(u32, u32)>,
     mic: Option<MicId>,
     status: String,
     notice: String,
@@ -82,6 +83,7 @@ impl CamdeskApp {
             monitors: Vec::new(),
             mics: Vec::new(),
             monitor: None,
+            monitor_size: None,
             mic: None,
             status: "Desconectado".into(),
             notice: String::new(),
@@ -242,6 +244,7 @@ impl CamdeskApp {
 
     fn record_ui(&mut self, ui: &mut egui::Ui) {
         ui.label("Grabación");
+        self.ensure_monitors();
         let monitor_label = self
             .monitors
             .iter()
@@ -252,16 +255,11 @@ impl CamdeskApp {
             .width(220.0)
             .selected_text(monitor_label)
             .show_ui(ui, |ui| {
-                if self.monitors.is_empty() {
-                    self.monitors = monitors();
-                    if self.monitor.is_none() {
-                        self.monitor = self.monitors.first().map(|item| item.id.clone());
-                    }
-                }
                 for item in &self.monitors {
                     let selected = self.monitor.as_ref() == Some(&item.id);
                     if ui.selectable_label(selected, monitor_text(item)).clicked() {
                         self.monitor = Some(item.id.clone());
+                        self.monitor_size = Some((item.width, item.height));
                         self.dirty = true;
                     }
                 }
@@ -522,12 +520,27 @@ impl CamdeskApp {
         egui::Image::from_texture(texture).paint_at(ui, fitted);
     }
 
+    fn ensure_monitors(&mut self) {
+        if !self.monitors.is_empty() {
+            return;
+        }
+        self.monitors = monitors();
+        self.monitor = self.picked_monitor();
+    }
+
+    fn picked_monitor(&self) -> Option<MonitorId> {
+        if let Some((width, height)) = self.monitor_size {
+            if let Some(item) = self.monitors.iter().find(|item| item.width == width && item.height == height) {
+                return Some(item.id.clone());
+            }
+        }
+        self.monitors.first().map(|item| item.id.clone())
+    }
+
     fn start_recording(&mut self) {
         point_at_ffmpeg();
-        if self.monitors.is_empty() {
-            self.monitors = monitors();
-        }
-        let Some(monitor) = self.monitor.clone().or_else(|| self.monitors.first().map(|item| item.id.clone())) else {
+        self.ensure_monitors();
+        let Some(monitor) = self.monitor.clone().or_else(|| self.picked_monitor()) else {
             self.notice = "No hay un monitor para grabar".into();
             return;
         };
@@ -590,6 +603,11 @@ impl CamdeskApp {
                 "blur" => self.blur_strength = value.trim().parse().unwrap_or(0.5),
                 "system_audio" => self.system_audio = value.trim() != "0",
                 "mic" => self.mic_on = value.trim() != "0",
+                "monitor" => {
+                    self.monitor_size = value.trim().split_once('x').and_then(|(width, height)| {
+                        Some((width.parse().ok()?, height.parse().ok()?))
+                    });
+                }
                 _ => {}
             }
         }
@@ -606,7 +624,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -623,6 +641,10 @@ impl CamdeskApp {
             self.blur_strength,
             if self.system_audio { "1" } else { "0" },
             if self.mic_on { "1" } else { "0" },
+            match self.monitor_size {
+                Some((width, height)) => format!("{width}x{height}"),
+                None => String::new(),
+            },
         );
         let _ = std::fs::write(path, text);
     }
