@@ -54,9 +54,9 @@ Nadie edita el crate de otro. La integración vive solo en `app`. `desktop/Cargo
 - La grabación usa encoder de hardware (NVENC, AMF, Quick Sync) y `h264_mf` como último recurso. No se usa `libx264`. FFmpeg es build LGPL.
 - La grabación es a 30 fps constantes, en MP4 fragmentado, y rellena con silencio cuando el loopback no entrega audio.
 - El micrófono de la grabación no se reproduce por los parlantes.
-- Orden de efectos por frame: rotación → desenfoque de fondo → corrección de color → espejo → preview y lienzo. Los efectos no tocan la grabación de pantalla.
-- Un efecto que falla se apaga y avisa; nunca corta la cámara virtual. Sin RTX o sin runtime, el desenfoque queda deshabilitado con el motivo, sin respaldo.
-- Al abrir la ventana no se carga FFmpeg (carga diferida), no se carga el runtime de NVIDIA, no se registra la cámara virtual, no se crea el archivo mapeado, no se corre adb, no se abre WASAPI y no se captura la pantalla. Eso ocurre al conectar, al grabar, al activar el desenfoque o al marcar la vista previa de la pantalla, que no se recuerda entre sesiones.
+- Orden de efectos por frame: rotación → limpieza NVIDIA → desenfoque de fondo → color automático → corrección de color → espejo → preview y lienzo. Los efectos no tocan la grabación de pantalla.
+- Un efecto que falla se apaga y avisa; nunca corta la cámara virtual. Sin RTX o sin runtime, el desenfoque y la mejora de imagen quedan deshabilitados con el motivo, sin respaldo.
+- Al abrir la ventana no se carga FFmpeg (carga diferida), no se carga el runtime de NVIDIA, no se registra la cámara virtual, no se crea el archivo mapeado, no se corre adb, no se abre WASAPI y no se captura la pantalla. Eso ocurre al conectar, al grabar, al activar el desenfoque o la mejora de imagen, o al marcar la vista previa de la pantalla, que no se recuerda entre sesiones.
 - Textos de la interfaz en español.
 
 ## Cómo coordinarse
@@ -72,7 +72,7 @@ Nadie edita el crate de otro. La integración vive solo en `app`. `desktop/Cargo
 - `protocol`, `vcam-shm` y `link`: `cargo test -p <crate>` tiene que pasar sin hardware, en Windows y en macOS. `link` se prueba con un servidor TCP local que reproduce fixtures de bytes: handshake, corte a mitad de frame, magic roto, frame de más de 4 MiB, rechazo por otro cliente.
 - `vcam-shm`: test de escritor y lector en hilos separados que nunca entrega un frame mezclado.
 - `decode`: test con un Annex-B mínimo grabado en el repo, sin red. Cubre las cuatro rotaciones y el lienzo con barras.
-- `fx`: `cargo test -p fx` prueba la corrección de color con píxeles fijos (neutro no cambia nada, extremos sin desborde) en cualquier sistema. El desenfoque NVIDIA no tiene test automático: quien lo toque deja dicho en qué GPU y versión del runtime lo probó, y a cuántos fps.
+- `fx`: `cargo test -p fx` prueba la corrección de color y el color automático con píxeles fijos (neutro no cambia nada, extremos sin desborde, tinte y exposición) en cualquier sistema. El desenfoque y la limpieza NVIDIA no tienen test automático: quien los toque deja dicho en qué GPU y versión del runtime los probó, y a cuántos fps (`cargo test -p fx --release -- --ignored --nocapture` los mide).
 - `record`: no se exige un MP4 en CI. Quien lo toque deja dicho en el resumen cómo lo probó, qué encoder abrió, o que no pudo abrir el encoder de hardware.
 - `vcam`: no tiene test automático. Quien lo toque deja dicho si Zoom y Meet listaron la cámara.
 - `app`: `cargo build -p camdesk` tiene que compilar en Windows. La prueba con el teléfono, Zoom, Meet y el MP4 es la lista de PLAN.md, no un sustituto de los tests de crate.

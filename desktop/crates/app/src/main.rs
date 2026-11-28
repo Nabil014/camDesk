@@ -70,6 +70,12 @@ struct CamdeskApp {
     blur_note: String,
     /// Aviso de modo rendimiento mientras el desenfoque siga prendido.
     blur_perf: Option<String>,
+    /// Limpieza NVIDIA de compresión y ruido. Como el desenfoque, no se prende sola al abrir.
+    cleanup_on: bool,
+    cleanup_strong: bool,
+    cleanup_note: String,
+    /// Balance de blancos, niveles y exposición automáticos. Rust puro: se recuerda.
+    auto_color: bool,
     system_audio: bool,
     mic_on: bool,
     monitors: Vec<record::MonitorInfo>,
@@ -135,6 +141,10 @@ impl CamdeskApp {
             blur: None,
             blur_note: String::new(),
             blur_perf: None,
+            cleanup_on: false,
+            cleanup_strong: false,
+            cleanup_note: String::new(),
+            auto_color: false,
             system_audio: true,
             mic_on: true,
             monitors: Vec::new(),
@@ -317,6 +327,7 @@ impl CamdeskApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::ghost_button(ui, "Restablecer").clicked() {
                     self.color = ColorParams::default();
+                    self.auto_color = false;
                     self.dirty = true;
                     self.send_color();
                 }
@@ -330,9 +341,14 @@ impl CamdeskApp {
             .inner_margin(egui::Margin::symmetric(10, 8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.add_enabled_ui(available, |ui| self.blur_controls(ui));
-                if !self.blur_note.is_empty() {
-                    ui.label(egui::RichText::new(&self.blur_note).font(theme::body(12.0)).color(theme::TEXT_SOFT));
+                ui.add_enabled_ui(available, |ui| {
+                    self.blur_controls(ui);
+                    self.cleanup_controls(ui);
+                });
+                for note in [&self.blur_note, &self.cleanup_note] {
+                    if !note.is_empty() {
+                        ui.label(egui::RichText::new(note).font(theme::body(12.0)).color(theme::TEXT_SOFT));
+                    }
                 }
                 if !available {
                     ui.hyperlink_to(
@@ -344,7 +360,7 @@ impl CamdeskApp {
         if !available && self.notice.is_empty() {
             self.notice = "Sin desenfoque\nSin GPU NVIDIA, o sin el runtime de NVIDIA Video Effects. La cámara sigue.".into();
         }
-        let mut changed = false;
+        let mut changed = widgets::checkbox(ui, &mut self.auto_color, "Color automático", Icon::None, "blancos y luz").changed();
         for (label, value) in [
             ("Brillo", &mut self.color.brightness),
             ("Contraste", &mut self.color.contrast),
@@ -393,6 +409,40 @@ impl CamdeskApp {
                 }
             }
         });
+    }
+
+    /// Una fila: la casilla y, al lado, la limpieza fuerte para Wi-Fi con poca señal.
+    fn cleanup_controls(&mut self, ui: &mut egui::Ui) {
+        let mut toggled = false;
+        let mut strong_changed = false;
+        ui.columns(2, |cols| {
+            toggled = widgets::checkbox(&mut cols[0], &mut self.cleanup_on, "Mejorar imagen", Icon::None, "").changed();
+            cols[1].add_enabled_ui(self.cleanup_on, |ui| {
+                strong_changed = widgets::checkbox(ui, &mut self.cleanup_strong, "Fuerte", Icon::None, "").changed();
+            });
+        });
+        if toggled {
+            // Igual que el desenfoque: el runtime se carga en el hilo de video, y si no carga
+            // llega CleanupFailed y la casilla vuelve a apagarse.
+            let ctx = ui.ctx().clone();
+            let command = Command::Cleanup { on: self.cleanup_on, strong: self.cleanup_strong };
+            match self.ensure_video(&ctx) {
+                Some(video) => video.send(command),
+                None => self.cleanup_on = false,
+            }
+            if !self.cleanup_on {
+                self.cleanup_note.clear();
+                if self.notice.starts_with("Mejora parcial") {
+                    self.notice.clear();
+                }
+            }
+        }
+        if strong_changed {
+            self.dirty = true;
+            if let Some(video) = &self.video {
+                video.send(Command::Cleanup { on: true, strong: self.cleanup_strong });
+            }
+        }
     }
 
     fn record_ui(&mut self, ui: &mut egui::Ui) {
@@ -576,6 +626,7 @@ impl CamdeskApp {
         if self.video.is_none() {
             match Video::spawn(ctx.clone()) {
                 Ok(video) => {
+                    video.send(Command::AutoColor(self.auto_color));
                     video.send(Command::Color(self.color));
                     video.send(Command::Mirror(self.mirror));
                     self.video = Some(video);
@@ -592,6 +643,7 @@ impl CamdeskApp {
 
     fn send_color(&self) {
         if let Some(video) = &self.video {
+            video.send(Command::AutoColor(self.auto_color));
             video.send(Command::Color(self.color));
         }
     }
@@ -712,6 +764,27 @@ impl CamdeskApp {
                     if self.blur_on {
                         self.blur_note = text.clone();
                         self.blur_perf = Some(text);
+                    }
+                }
+                Report::CleanupReady => self.cleanup_note.clear(),
+                Report::CleanupFailed(text) => {
+                    self.cleanup_on = false;
+                    self.cleanup_note = text;
+                }
+                Report::CleanupStopped(text) => {
+                    self.cleanup_on = false;
+                    self.cleanup_note = text;
+                    self.notice = "Sin mejora de imagen\nEl efecto falló y se apagó. La cámara sigue.".into();
+                }
+                Report::CleanupNotice(text) => {
+                    if self.cleanup_on {
+                        self.cleanup_note = text;
+                        let replace = self.notice.is_empty()
+                            || self.notice.starts_with("En vivo")
+                            || self.notice.starts_with("Teléfono vertical");
+                        if replace {
+                            self.notice = "Mejora parcial\nLa mejora de imagen dejó de quitar ruido para sostener 30 fps. Sigue quitando la compresión.".into();
+                        }
                     }
                 }
                 Report::DecodeError(text) => {
@@ -1142,6 +1215,8 @@ impl CamdeskApp {
                 "saturation" => self.color.saturation = value.trim().parse().unwrap_or(0.0),
                 "temperature" => self.color.temperature = value.trim().parse().unwrap_or(0.0),
                 "blur" => self.blur_strength = value.trim().parse().unwrap_or(0.5),
+                "auto_color" => self.auto_color = value.trim() == "1",
+                "cleanup_strong" => self.cleanup_strong = value.trim() == "1",
                 "system_audio" => self.system_audio = value.trim() != "0",
                 "mic" => self.mic_on = value.trim() != "0",
                 "last_recording" => {
@@ -1175,7 +1250,7 @@ impl CamdeskApp {
             LinkMode::Wifi => "wifi",
         };
         let text = format!(
-            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\nlast_recording={}\nmirror={}\n",
+            "mode={mode}\nip={}\nresolution={}\ncamera={}\nrotation={}\nbrightness={}\ncontrast={}\nsaturation={}\ntemperature={}\nblur={}\nsystem_audio={}\nmic={}\nmonitor={}\nmonitor_id={}\nsystem_device={}\nsystem_device_name={}\nlast_recording={}\nmirror={}\nauto_color={}\ncleanup_strong={}\n",
             self.ip,
             match self.resolution {
                 Resolution::P720 => "720",
@@ -1203,6 +1278,8 @@ impl CamdeskApp {
             self.system_device_name,
             self.last_recording.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
             if self.mirror { "1" } else { "0" },
+            if self.auto_color { "1" } else { "0" },
+            if self.cleanup_strong { "1" } else { "0" },
         );
         let _ = std::fs::write(path, text);
     }

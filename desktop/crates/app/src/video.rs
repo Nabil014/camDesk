@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
-use fx::{BackgroundBlur, ColorCorrector, ColorParams};
+use fx::{AutoColor, BackgroundBlur, ColorCorrector, ColorParams, ImageCleanup};
 use link::{Event, Session, SessionConfig, Status};
 use protocol::Rotation;
 
@@ -30,6 +30,9 @@ pub enum Command {
     Mirror(bool),
     Color(ColorParams),
     Blur { on: bool, strength: f32 },
+    /// Limpieza NVIDIA de compresión y ruido. `strong` = limpieza fuerte.
+    Cleanup { on: bool, strong: bool },
+    AutoColor(bool),
     Quit,
 }
 
@@ -44,6 +47,13 @@ pub enum Report {
     BlurStopped(String),
     /// Aviso del efecto que no lo apaga, por ejemplo el modo rendimiento.
     BlurNotice(String),
+    CleanupReady,
+    /// `ImageCleanup::new` falló: el efecto no llegó a prenderse.
+    CleanupFailed(String),
+    /// La limpieza falló con la sesión en marcha y se apagó.
+    CleanupStopped(String),
+    /// Aviso de la limpieza que no la apaga, por ejemplo dejar de quitar ruido.
+    CleanupNotice(String),
     DecodeError(String),
 }
 
@@ -98,10 +108,13 @@ struct Worker {
     decoder: Option<decode::Decoder>,
     writer: Option<vcam_shm::Writer>,
     color: ColorCorrector,
+    auto_color: Option<AutoColor>,
     rotation: Option<Rotation>,
     mirror: bool,
     blur: Option<BackgroundBlur>,
     blur_notice: Option<String>,
+    cleanup: Option<ImageCleanup>,
+    cleanup_notice: Option<String>,
     last_keyframe_request: Option<Instant>,
     rgba: Vec<u8>,
     canvas_y: Vec<u8>,
@@ -119,10 +132,13 @@ impl Worker {
             decoder: None,
             writer: None,
             color: ColorCorrector::new(),
+            auto_color: None,
             rotation: None,
             mirror: false,
             blur: None,
             blur_notice: None,
+            cleanup: None,
+            cleanup_notice: None,
             last_keyframe_request: None,
             rgba: Vec::new(),
             canvas_y: Vec::new(),
@@ -205,6 +221,26 @@ impl Worker {
                     Err(error) => self.report(Report::BlurFailed(error.message)),
                 },
             },
+            Command::Cleanup { on: false, .. } => {
+                self.cleanup = None;
+                self.cleanup_notice = None;
+            }
+            Command::Cleanup { on: true, strong } => match self.cleanup.as_mut() {
+                Some(fx) => fx.set_strong(strong),
+                None => match ImageCleanup::new(strong) {
+                    Ok(fx) => {
+                        self.cleanup = Some(fx);
+                        self.cleanup_notice = None;
+                        self.report(Report::CleanupReady);
+                    }
+                    Err(error) => self.report(Report::CleanupFailed(error.message)),
+                },
+            },
+            Command::AutoColor(on) => {
+                if on != self.auto_color.is_some() {
+                    self.auto_color = on.then(AutoColor::new);
+                }
+            }
             Command::Quit => return false,
         }
         true
@@ -216,6 +252,14 @@ impl Worker {
         self.last_keyframe_request = None;
         if let Some(decoder) = self.decoder.as_mut() {
             decoder.reset();
+        }
+        self.reset_auto_color();
+    }
+
+    /// Otra imagen: el color automático mide de cero en vez de arrastrar la anterior.
+    fn reset_auto_color(&mut self) {
+        if let Some(auto) = self.auto_color.as_mut() {
+            auto.reset();
         }
     }
 
@@ -245,6 +289,7 @@ impl Worker {
                         if let Some(decoder) = self.decoder.as_mut() {
                             decoder.reset();
                         }
+                        self.reset_auto_color();
                     }
                     session_over |= matches!(status, Status::Ocupado | Status::Incompatible);
                     self.report(Report::Status(status));
@@ -288,11 +333,30 @@ impl Worker {
         }
     }
 
-    /// Rotación (ya hecha por decode) → desenfoque → color → espejo → vista previa y lienzo.
+    /// Rotación (ya hecha por decode) → limpieza → desenfoque → color automático → color
+    /// manual → espejo → vista previa y lienzo.
     fn publish(&mut self, mut decoded: decode::Decoded) {
         let width = decoded.width as usize;
         let height = decoded.height as usize;
         let stride = width.saturating_mul(4);
+        // Primero la limpieza: los modelos de NVIDIA esperan el cuadro tal como salió de
+        // H.264, y la segmentación del desenfoque ve mejor sin bloques ni ruido.
+        if let Some(fx) = self.cleanup.as_mut() {
+            match fx.apply(&mut decoded.bgra, width, height, stride) {
+                Err(error) => {
+                    self.cleanup = None;
+                    self.cleanup_notice = None;
+                    self.report(Report::CleanupStopped(error.message));
+                }
+                Ok(()) => {
+                    let notice = fx.notice().map(str::to_string);
+                    if notice.is_some() && notice != self.cleanup_notice {
+                        self.cleanup_notice = notice.clone();
+                        self.report(Report::CleanupNotice(notice.unwrap_or_default()));
+                    }
+                }
+            }
+        }
         if let Some(fx) = self.blur.as_mut() {
             match fx.apply(&mut decoded.bgra, width, height, stride) {
                 Err(error) => {
@@ -308,6 +372,10 @@ impl Worker {
                     }
                 }
             }
+        }
+        // El automático va antes de los sliders: ellos quedan como ajuste fino sobre su resultado.
+        if let Some(auto) = self.auto_color.as_mut() {
+            auto.apply(&mut decoded.bgra, width, height, stride);
         }
         self.color.apply(&mut decoded.bgra, width, height, stride);
         // Al final: el modelo del desenfoque ve la imagen tal como salió de la cámara.

@@ -57,7 +57,7 @@ camDesk/
     crates/protocol/        bytes del socket, sin red, sin FFmpeg ni UI
     crates/link/            TCP, adb, reintento, resync; entrega frames y estado
     crates/decode/          H.264 → BGRA rotado (preview) y NV12 1920x1080 (cámara)
-    crates/fx/              desenfoque de fondo NVIDIA y corrección de color, sobre BGRA
+    crates/fx/              desenfoque y limpieza NVIDIA, color automático y manual, sobre BGRA
     crates/vcam-shm/        contrato de memoria compartida (leer y escribir)
     crates/vcam/            DLL IMFMediaSource + registro de la cámara virtual
     crates/record/          pantalla + audios → MP4
@@ -83,7 +83,7 @@ link, decode, fx, vcam, record, vcam-shm ← app
 
 - Objetivo: `x86_64-pc-windows-msvc`, Windows 11 22000+.
 - `protocol`, `vcam-shm` y `link` compilan y pasan `cargo test` también en macOS y Linux. Lo específico de Windows (ACL del archivo mapeado) va detrás de `#[cfg(windows)]`.
-- `fx`: la corrección de color es Rust puro y se prueba en cualquier sistema; el desenfoque NVIDIA va detrás de `#[cfg(windows)]`.
+- `fx`: la corrección de color y el color automático son Rust puro y se prueban en cualquier sistema; el desenfoque y la limpieza NVIDIA van detrás de `#[cfg(windows)]`.
 - `decode`, `vcam`, `record` y `app` se compilan y prueban en Windows.
 
 ## Firmas públicas iniciales
@@ -134,6 +134,9 @@ pub fn blur_availability() -> BlurAvailability;  // chequeo liviano, no carga el
 pub struct FxError { pub message: String }
 pub struct BackgroundBlur;         // new() -> Result (carga runtime y modelos); set_strength(f32); apply(...) -> Result<(), FxError>; notice() -> Option<&str>
 // notice() avisa sin apagar el efecto, por ejemplo al pasar a modo rendimiento.
+pub struct ImageCleanup;           // new(strong: bool) -> Result; set_strong(bool); apply(...) -> Result<(), FxError>; notice() -> Option<&str>
+// Mismos requisitos que BackgroundBlur: blur_availability() vale para los dos.
+pub struct AutoColor;              // new(); reset(); apply(bgra: &mut [u8], width, height, stride). Mide y corrige cada cuadro, sin E/S.
 
 // vcam-shm
 pub const WIDTH: u32 = 1920; pub const HEIGHT: u32 = 1080; pub const STRIDE: u32 = 1920;
@@ -184,7 +187,7 @@ La cámara virtual es siempre **1920x1080 NV12 a 30 fps**. No cambia con la rota
 
 ## Efectos
 
-Orden fijo por frame: decode → rotación → desenfoque de fondo → corrección de color → espejo → preview y lienzo NV12. `app` hace la cadena llamando a `decode` y a `fx`. El desenfoque va después de la rotación porque el modelo espera a la persona derecha, y antes del color para que la segmentación vea la imagen original.
+Orden fijo por frame: decode → rotación → limpieza NVIDIA → desenfoque de fondo → color automático → corrección de color → espejo → preview y lienzo NV12. `app` hace la cadena llamando a `decode` y a `fx`. El desenfoque va después de la rotación porque el modelo espera a la persona derecha, y antes del color para que la segmentación vea la imagen original. La limpieza va primero porque sus modelos esperan el cuadro tal como salió de H.264, y la segmentación ve mejor sin bloques ni ruido. El color automático va antes de los sliders: ellos quedan como ajuste fino sobre su resultado.
 
 Los efectos afectan a la preview y a la cámara virtual. No afectan a la grabación de pantalla. Los ajustes se recuerdan entre sesiones en `%LOCALAPPDATA%\Camdesk\config.toml` (dueño: `app`).
 
@@ -200,6 +203,20 @@ Los efectos afectan a la preview y a la cámara virtual. No afectan a la grabaci
 - Camino de datos en v1: BGRA en CPU → GPU (`NvCVImage_Transfer`) → `GreenScreen` → `BackgroundBlur` → CPU. El decode sigue en CPU. Mantener todo en GPU (decode D3D11 + interop CUDA) queda como optimización posterior.
 - Si cambia el tamaño del frame (rotación, 720p/1080p), `apply()` se reconfigura sola. El primer frame después del cambio puede tardar más.
 - Si el efecto falla en medio de la sesión (driver, memoria de GPU), se apaga, se avisa en la UI y el video sigue sin desenfoque. La cámara virtual nunca se corta por un efecto.
+
+### Mejorar imagen (limpieza NVIDIA)
+
+- NVIDIA no tiene un efecto de color. El runtime 0.7.6 trae solo `AIGS` (GreenScreen), `AR` (ArtifactReduction), `Denoise` (Denoising) y `SR` (SuperRes). La limpieza usa los dos del medio: `ArtifactReduction` quita los bloques de H.264 y `Denoising` el ruido de poca luz. Con eso el color se ve más limpio, aunque no se corrige. Lo corrige el color automático.
+- Mismo runtime, requisitos, carga diferida y reglas de fallo que el desenfoque. Es otra casilla, «Mejorar imagen», al lado de una casilla «Fuerte». No se prende sola al abrir; «Fuerte» se recuerda.
+- Camino: BGRA en CPU → BGR planar float 0..1 en GPU → `ArtifactReduction` → `Denoising` → CPU. «Fuerte» pasa `ArtifactReduction` a modo 1 y `Denoising` a fuerza 1, y recarga los modelos. `Denoising` lleva un estado temporal en memoria de CUDA (`cudaMalloc` del `cudart64_12.dll` del runtime).
+- `ArtifactReduction` no carga con más de 1080 de alto. El cuadro vertical (720x1280, 1080x1920) se transpone en CPU, se limpia acostado y se vuelve a transponer.
+- Si los dos efectos no sostienen 30 fps, `Denoising` se apaga, queda la compresión y se avisa («Mejora parcial»). Si falla, se apaga y la cámara sigue.
+
+### Color automático
+
+- Casilla «Color automático». Rust puro, en CPU, sin runtime. Se recuerda entre sesiones. Restablecer la apaga.
+- Mide una de cada 4x4 posiciones del cuadro. Usa mundo gris para el tinte: corrige la mitad, con ganancias entre 0,8 y 1,25, sin mover la luma media y sin contar lo quemado ni lo casi negro. Usa percentiles 0,5 % y 99,5 % de la luma para negro y blanco: el negro baja como mucho 24 niveles y el blanco se estira hasta ×1,6. Para la exposición, una curva lleva la luma media hacia 0,40..0,56; dentro de esa franja no se toca.
+- Acerca el ajuste un 8 % por cuadro (unos 0,4 s a 30 fps) para que no parpadee. Al reconectar mide de cero (`reset()`).
 
 ### Corrección de color
 
@@ -368,12 +385,14 @@ El repo es público y las versiones se publican como releases de GitHub (`Nabil0
 6. Grabar 15 segundos con un video sonando y hablando al micrófono. El MP4 muestra el monitor y se oyen las dos cosas. Repetir con Zoom usando la cámara al mismo tiempo.
 7. Grabar 30 minutos con la pantalla quieta parte del tiempo y sin sonido parte del tiempo: el audio sigue sincronizado al final y el MP4 dura 30 minutos.
 8. Cortar el Wi-Fi: estado desconectado, la cámara virtual se queda en el último cuadro y vuelve al reconectar.
-9. Abrir la app: ventana usable en menos de 1 s y, en Process Explorer, ninguna DLL de FFmpeg ni de NVIDIA cargada hasta conectar o activar el desenfoque.
+9. Abrir la app: ventana usable en menos de 1 s y, en Process Explorer, ninguna DLL de FFmpeg ni de NVIDIA cargada hasta conectar o activar el desenfoque o la mejora de imagen.
 10. En una PC con RTX y el runtime: activar el desenfoque con Zoom abierto. El fondo se ve desenfocado en Zoom y en la preview, la cámara sigue a 30 fps y la imagen sigue bien al girar el teléfono.
 11. En una PC sin RTX o sin runtime: la casilla está deshabilitada y dice por qué.
 12. Mover los sliders de color: el cambio se ve en la preview y en Zoom. Restablecer deja la imagen como sin efectos. Al reabrir la app, los ajustes siguen.
+13. En una PC con RTX y el runtime, con el teléfono por Wi-Fi en una pieza con poca luz: «Mejorar imagen» quita los bloques y el ruido en la preview y en Zoom, a 30 fps, también con el teléfono vertical y junto con el desenfoque.
+14. «Color automático» con una lámpara cálida o un cielo azul en el cuadro: el tinte baja y la imagen oscura se aclara sin parpadear. Apagarlo vuelve a la imagen original.
 
-Los crates `protocol`, `vcam-shm` y `link`, y la corrección de color de `fx`, se prueban sin teléfono y sin Zoom, con fixtures de bytes.
+Los crates `protocol`, `vcam-shm` y `link`, y la corrección de color y el color automático de `fx`, se prueban sin teléfono y sin Zoom, con fixtures de bytes.
 
 Resultados parciales en esta PC (25/11/2026). Zoom no está instalado. Meet lista cellCam; sin imagen del teléfono el cuadro queda negro.
 
@@ -389,6 +408,8 @@ Resultados parciales en esta PC (25/11/2026). Zoom no está instalado. Meet list
 10. RTX 4060 y runtime NVIDIA Video Effects 0.7.6. `BackgroundBlur::new` carga `GreenScreen` y `BackgroundBlur` en modo calidad. En un cuadro sintético de 1280x720 el efecto cambia la imagen (diferencia media 31) y tarda unos 5,5 ms; a 1920x1080, unos 7,7 ms. No hizo falta pasar a modo rendimiento. Con el teléfono en vivo a 1280x720, antes de marcar la casilla no estaban cargadas `NVVideoEffects.dll` ni `NVCVImage.dll`. Al marcarla se cargan y el detalle baja (de 2,10 a 1,87) sin mover el promedio del cuadro. La cadencia siguió en 29,3 fps con el efecto y 30,4 fps al apagarlo. No apareció el aviso de modo rendimiento. Más tarde, con una persona en el cuadro vertical, el techo pasa de una desviación de 11,1 a 2,2 y la persona se queda en 58 a 55. La cadencia fue 30,3 fps. Las DLL de NVIDIA se cargaron al marcar la casilla y no antes. Tampoco apareció el aviso de modo rendimiento. La persona sigue de costado. Zoom no está instalado. Para ver el aviso, una corrida forzó el presupuesto de cuadro a 0 ms (el real es 34 ms) y lo devolvió después de la captura. Con el teléfono en vivo, al marcar Desenfocar fondo el aviso pasó a «Modo rendimiento» y «El desenfoque pasó a modo rendimiento para sostener 30 fps.», en ámbar. La casilla quedó prendida, el pie siguió «En vivo · 1280×720» y la vista previa no se cortó. El presupuesto volvió a 34 ms y el ejecutable se recompiló. Abrir de nuevo, sin marcar la casilla, no muestra ese aviso ni carga `NVVideoEffects.dll`. Para ver un fallo a mitad de sesión, una corrida hizo fallar `apply` al cuadro 13 y lo quitó después de la captura. Con el teléfono en vivo, al marcar Desenfocar fondo el aviso pasó a «Sin desenfoque» y «El efecto falló y se apagó. La cámara sigue.», en ámbar. La casilla quedó apagada, el detalle dijo «GreenScreen falló», el pie siguió «En vivo · 1280×720» y la vista previa siguió. El forzado se revirtió y el ejecutable se recompiló.
 11. En esta PC (RTX 4060 y runtime 0.7.6) la casilla «Desenfocar fondo» queda habilitada, sin motivo ni enlace, y al abrir no se cargan `NVVideoEffects.dll` ni FFmpeg. La rama sin runtime muestra la casilla y la fuerza deshabilitadas, el texto «sin el runtime de NVIDIA Video Effects» y el enlace «Descargar el runtime» hacia la página del redistribuible 0.7.6. Esa rama se vio forzando el resultado en una corrida local que después se revirtió: no hay otra PC sin RTX. Con el mismo forzado, ya en En vivo · 1280×720 por USB, el aviso dijo «Sin desenfoque» / «Sin GPU NVIDIA, o sin el runtime de NVIDIA Video Effects. La cámara sigue.», la casilla quedó apagada, el texto del runtime y el enlace siguieron, y la vista previa siguió llegando. Se revirtió el forzado: al abrir no aparece ese aviso y no se cargan `NVVideoEffects.dll` ni FFmpeg. La config no cambió y el forward quedó en `e5c31a82 tcp:4747`.
 12. Sin conectar, los cuatro sliders se movieron a brillo 0,2, contraste −0,4, saturación 0,6 y temperatura −0,25. Al cerrar y reabrir, los cuatro volvieron en esos valores. Restablecer los dejó en 0 y lo escribió en la config; la fuerza del desenfoque no se tocó. Con el teléfono en vivo a 1280x720, el brillo 0,35 dejó el cuadro en un promedio de 198; subirlo a 1 lo llevó a 235, y Restablecer (brillo 0) lo bajó a 142. Después se restauró el brillo 0,35. Con el brillo en 0, el contraste al máximo sube la desviación de 78,8 a 96,1. La saturación al máximo lleva el color de |U| 4,2 y |V| 4,0 a 9,2 y 8,9. La temperatura al máximo deja U en 92,6 y V en 157,5 (el neutro estaba en 124 y 131). Se dejó otra vez el brillo 0,35 y el resto en 0. Zoom no está instalado. `cargo test -p fx` ya cubre que el neutro no cambia un píxel y que el brillo alto aclara un gris.
+13. (28/11/2026) RTX 4060 y runtime 0.7.6. Se midió con el test ignorado `limpieza_en_esta_gpu`, sobre un cuadro sintético con bloques de 8x8 y ruido de ±12. `ArtifactReduction` + `Denoising` en modo suave tarda unos 6,5 ms a 1280x720, 14 ms a 1920x1080 y 11,6 ms a 720x1280 transpuesto. El primer cuadro tarda unos 80 ms, por la carga de modelos. La diferencia media con el original queda en 4,8, es decir, saca el ruido, y el promedio de cada canal se mueve menos de 4. «Fuerte» recarga sin error. Sin transponer, 720x1280 falla: `ArtifactReduction no cargó: Error while loading the TRT model (-10)`. El desenfoque siguió igual después de partir el runtime en dos efectos: diferencia 31,1 y 5,4 ms a 720p. Al abrir no están `NVVideoEffects.dll` ni `cudart64_12.dll`; al marcar «Mejorar imagen» se cargan, con el teléfono en vivo por Wi-Fi a 1920x1080, y la vista previa sigue. No se midieron los fps en vivo con el efecto, ni el teléfono vertical en vivo, ni la combinación con el desenfoque. Zoom no está instalado.
+14. `cargo test -p fx` cubre el color automático: no toca una escena gris ya balanceada (8 niveles como mucho), baja el tinte azul, aclara una imagen oscura y lavada, cambia de a poco entre cuadros, respeta el alfa y el relleno del stride, y aguanta cuadros planos y vacíos. No se probó en vivo con una luz de color.
 
 Causa de «la persona se ve de costado» en el punto 2, leída en el código de cellCam y no corregida desde aquí: cellCam manda `rotationDegrees` de CameraX, que sigue a `targetRotation`, y `targetRotation` solo cambia cuando dispara `OrientationEventListener` (`StreamService.kt`, `createOrientationListener`). Con la pantalla apagada o el teléfono quieto, el listener no dispara y la rotación queda en la del arranque. Camdesk aplica la que recibe: con el teléfono en la mano, la persona sale derecha, y `la_rotacion_es_horaria_y_no_espeja` en `decode` fija el sentido de las cuatro rotaciones. Se corrige en el repo de cellCam.
 
